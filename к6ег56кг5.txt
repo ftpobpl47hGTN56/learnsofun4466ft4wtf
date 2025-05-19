@@ -1,0 +1,3327 @@
+  
+// === combined.js ===
+
+// ======= включение логирования ======= //
+// Включаем логирование по умолчанию 
+let loggingEnabled = getStorage('enableLogging', false);
+
+function isLoggingEnabled() {
+    return getStorage('enableLogging', false);
+}
+
+function setLoggingEnabled(enabled) {
+    console.log("[Debug] setLoggingEnabled called with:", enabled);
+    loggingEnabled = enabled;
+    setStorage('enableLogging', enabled);
+    if (isLoggingEnabled()) {
+        console.log(`[Logging] Logging is now ${enabled ? 'enabled' : 'disabled'}`);
+    }
+}
+
+// Определяем цвета для категорий
+const logStyles = {
+    'Debug': 'color:rgb(209, 153, 100); font-weight: bold;', 
+    'Logging': 'color: #2ecc71; font-weight: bold;', // Зеленый
+    'Twitch Emote Blocker': 'color: #9b59b6; font-weight: bold;', // Фиолетовый
+    'EXT': 'color: #e67e22; font-weight: bold;', // Оранжевый
+    'default': 'color:rgb(80, 179, 192); font-weight: normal;', // Серый для остальных
+    'Blocking': 'color:rgb(167, 134, 189); font-weight: bold;' // Красный
+};
+
+// Функция для получения стиля по категории
+function getLogStyle(category) {
+    return logStyles[category] || logStyles['default'];
+}
+
+// Переопределяем console методы
+(function () {
+    const originalConsoleLog = console.log;
+    const originalConsoleWarn = console.warn;
+    const originalConsoleError = console.error;
+
+    console.log = function (...args) {
+        if (!isLoggingEnabled()) return;
+
+        if (args.length > 0 && typeof args[0] === 'string') {
+            // Извлекаем категорию из строки вида [Category]
+            const match = args[0].match(/^\[([^\]]+)\]/);
+            if (match) {
+                const category = match[1];
+                const style = getLogStyle(category);
+                // Формируем сообщение с цветом для категории
+                const formattedMessage = `%c${args[0]}`;
+                originalConsoleLog.apply(console, [formattedMessage, style, ...args.slice(1)]);
+                return;
+            }
+        }
+        // Если категория не найдена, используем стиль по умолчанию
+        originalConsoleLog.apply(console, [`%c${args[0]}`, logStyles['default'], ...args.slice(1)]);
+    };
+
+    console.warn = function (...args) {
+        if (!isLoggingEnabled()) return;
+        // Для warn используем желтый цвет
+        if (args.length > 0 && typeof args[0] === 'string') {
+            const match = args[0].match(/^\[([^\]]+)\]/);
+            if (match) {
+                const category = match[1];
+                const style = getLogStyle(category);
+                originalConsoleWarn.apply(console, [`%c${args[0]}`, style, ...args.slice(1)]);
+                return;
+            }
+        }
+        originalConsoleWarn.apply(console, args);
+    };
+
+    console.error = function (...args) {
+        if (!isLoggingEnabled()) return;
+        // Для error используем красный цвет
+        if (args.length > 0 && typeof args[0] === 'string') {
+            const match = args[0].match(/^\[([^\]]+)\]/);
+            if (match) {
+                const category = match[1];
+                const style = getLogStyle(category);
+                originalConsoleError.apply(console, [`%c${args[0]}`, style, ...args.slice(1)]);
+                return;
+            }
+        }
+        originalConsoleError.apply(console, args);
+    };
+})();
+
+// Экспортируем setLoggingEnabled в глобальную область
+window.setLoggingEnabled = setLoggingEnabled;
+
+// Инициализационные логи
+if (isLoggingEnabled()) {
+    console.log("[Twitch Emote Blocker] Injected in:", window.location.href, "Is iframe:", window !== window.top);
+    console.log("[Twitch Emote Blocker] Script started loading...");
+    console.log("[EXT] Injected in:", window.location.href);
+}
+
+// ====== end of включение логирования ====== //
+
+// === storage.js === //
+
+let cachedBlockedEmotes = null;
+let cachedBlockedChannels = null;
+
+function getStorage(key, defaultValue) {
+    if (key === 'blockedEmotes' && cachedBlockedEmotes !== null) {
+        return cachedBlockedEmotes;
+    }
+    if (key === 'blockedChannels' && cachedBlockedChannels !== null) {
+        return cachedBlockedChannels;
+    }
+    const rawData = localStorage.getItem(key);
+    try {
+        const value = rawData ? JSON.parse(rawData) : defaultValue;
+        if (key === 'blockedEmotes') cachedBlockedEmotes = value;
+        if (key === 'blockedChannels') cachedBlockedChannels = value;
+        return value;
+    } catch (e) {
+        console.error(`[Storage] Error parsing ${key}:`, e);
+        return defaultValue;
+    }
+}
+
+function setStorage(key, value) {
+    try {
+        if (key === 'blockedEmotes') cachedBlockedEmotes = value;
+        if (key === 'blockedChannels') cachedBlockedChannels = value;
+        localStorage.setItem(key, JSON.stringify(value));
+        console.log(`[Storage] Saved ${key}:`, value.length, 'items');
+    } catch (e) {
+        console.error(`[Storage] Error saving ${key}:`, e);
+    }
+}
+
+// === end of storage.js  === //
+
+// === blocking.js ===
+let blockedEmotes = [];
+let blockedChannels = [];
+let blockedEmoteIDs = new Set();
+let blockedChannelIDs = new Set();
+let newlyAddedIds = new Set();
+let isObservingChat = false;
+let retryCount = 0;
+const maxRetries = 20;
+let mutationCount = 0;
+let isBlockingEnabled = true;
+let processedEmotes = new WeakMap();
+
+// Переменные для отслеживания состояния
+let lastKnownBlockedCount = blockedEmotes.length + blockedChannels.length;
+let lastCheckTime = Date.now();
+let isRestarting = false;
+
+// Функция отображения уведомлений
+function showNotification(message, duration = 3000) {
+    const notification = document.createElement('div');
+    notification.innerText = message;
+    notification.style.position = 'fixed';
+    notification.style.bottom = '10px';
+    notification.style.right = '10px';
+    notification.style.backgroundColor = ' #341d41';
+    notification.style.color = ' #30aa54';
+    notification.style.padding = '10px';
+    notification.style.borderRadius = '5px';
+    notification.style.boxShadow = '0 2px 10px rgba(0,0,0,0.3)';
+    notification.style.zIndex = '10000';
+    notification.style.fontSize = '14px';
+    notification.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+    notification.style.opacity = '0';
+    notification.style.transform = 'scale(0.8)';
+
+    document.body.appendChild(notification);
+
+    // Анимация появления
+    setTimeout(() => {
+        notification.style.opacity = '1';
+        notification.style.transform = 'scale(1)';
+    }, 10);
+
+    // Анимация исчезновения
+    setTimeout(() => {
+        notification.style.opacity = '0';
+        notification.style.transform = 'scale(0.8)';
+        setTimeout(() => notification.remove(), 300);
+    }, duration);
+}
+
+// =========   Функция checkBlockingStatus  ========== //
+// Функция проверки состояния блокировки
+
+function checkBlockingStatus() {
+    console.log(
+        `%c[WATCHDOG] %cПроверка состояния блокировки... isBlockingEnabled: ${isBlockingEnabled}`,
+        'color:rgb(82, 142, 255); font-weight: bold;',
+        'color: rgb(164, 207, 44);'
+    );
+
+    const chatContainer = document.querySelector('.chat-scrollable-area__message-container') ||
+                         document.querySelector('.chat-room__content') ||
+                         document.querySelector('[data-a-target="chat-room-content"]') ||
+                            document.querySelector('. chat-line__message tw-relative') ||
+                         document.querySelector('.chat-list--default');
+    
+    if (!chatContainer) {
+        console.log(
+            `%c[WATCHDOG]%c Контейнер чата не найден. URL: ${window.location.href}`,
+            'color:rgb(172, 147, 223); font-weight: bold;',
+            'color: rgb(164, 207, 44);'
+        );
+        return false;
+    }
+
+    const messages = chatContainer.querySelectorAll('.chat-line__message');
+    if (messages.length === 0) {
+        console.log("[WATCHDOG] Сообщения в чате не найдены, возможно, чат ещё загружается");
+        return true;
+    }
+
+    const emotes = chatContainer.querySelectorAll(
+        '.chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote' +
+        '.ffz--inline, ' +
+        '.chat-line__message img, .chat-line__message .emote, ' +
+        '.chat-line__message .bttv-emote, .chat-line__message .seventv-emote, ' +
+        '.chat-line__message .ffz-emote, .chat-line__message .twitch-emote'
+    );
+
+    if (emotes.length === 0) {
+        console.log("[WATCHDOG] Эмодзи в чате не найдены, пропускаем проверку");
+        return true;
+    }
+
+    let failureDetected = false;
+
+    emotes.forEach((emote, index) => {
+        if (index > 5) return;
+        const emoteId = emote.getAttribute('data-emote-id');
+        const shouldBeBlocked = emoteId && (blockedChannelIDs.has(emoteId) || blockedEmoteIDs.has(emoteId));
+        const isVisible = emote.style.display !== 'none';
+
+        if (isBlockingEnabled && shouldBeBlocked && isVisible) {
+            console.log(`[WATCHDOG] Обнаружен сбой: эмодзи с ID ${emoteId} должен быть скрыт, но виден!`);
+            failureDetected = true;
+        } else if (!isBlockingEnabled && isVisible === false) {
+            console.log(`[WATCHDOG] Обнаружен сбой: эмодзи с ID ${emoteId} должен быть виден, но скрыт!`);
+            failureDetected = true;
+        }
+    });
+
+    const currentBlockedCount = blockedEmotes.length + blockedChannels.length;
+    if (currentBlockedCount !== lastKnownBlockedCount) {
+        console.log(
+            `%c[WATCHDOG] %cКоличество заблокированных элементов изменилось: %c${lastKnownBlockedCount} -> ${currentBlockedCount}`,
+            'color: rgb(221, 101, 175); font-weight: bold;',
+            'color: rgb(164, 207, 44);',
+            'color: rgb(255, 165, 0); font-weight: bold;'
+        );
+        lastKnownBlockedCount = currentBlockedCount;
+    }
+
+    console.log(`[WATCHDOG] Blocking status: ${failureDetected ? 'Failure detected' : 'Working correctly'}`);
+    return !failureDetected;
+}
+
+// ========= end of Функция checkBlockingStatus  ======== //
+
+//  ============== Функция перезапуска логики блокировки ============= //
+
+function restartBlockingLogic() {
+    if (isRestarting) return;
+    isRestarting = true;
+
+    console.log(
+        '%c[WATCHDOG]%c Перезапуск логики блокировки... isBlockingEnabled: ${isBlockingEnabled}',
+        'color: #FF4500; font-weight: bold;',
+        'color: #FF4500;'
+    );
+    showNotification("Chat not found or blocking failed. Restarting...", 3000);
+
+    // Сохраняем текущее состояние
+    const currentBlockingState = isBlockingEnabled;
+
+    observer.disconnect();
+    observerIsActive = false;
+
+    const chatContainer = document.querySelector('.chat-scrollable-area__message-container') ||
+                         document.querySelector('.chat-room__content') ||
+                         document.querySelector('[data-a-target="chat-room-content"]') ||
+                         document.querySelector('. chat-line__message tw-relative') ||
+                         document.querySelector('.chat-list--default');
+    if (chatContainer) {
+        const emotes = chatContainer.querySelectorAll(
+            '.ffz--inline, ' +
+            '.chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote' +
+            '.chat-line__message img, .chat-line__message .emote, ' +
+            '.chat-line__message .bttv-emote, .chat-line__message .seventv-emote, ' +
+            '.chat-line__message .ffz-emote, .chat-line__message .twitch-emote',
+            '.chat-line__message tw-relative'
+        );
+        emotes.forEach(emote => {
+            emote.style.display = '';
+            emote.removeAttribute('data-emote-id');
+        });
+        toggleEmotesInNode(chatContainer);
+    }
+
+    processedEmotes = new WeakMap();
+    observeChatContainer();
+
+    // Восстанавливаем состояние
+    isBlockingEnabled = currentBlockingState;
+    setStorage('isBlockingEnabled', isBlockingEnabled);
+
+    const searchTerm = uiElements?.searchInput?.value.trim();
+    if (searchTerm) {
+        filterBlockedList(searchTerm);
+    }
+
+    if (uiElements?.counter) {
+        updateCounter(uiElements.counter);
+    }
+
+    setTimeout(() => {
+        isRestarting = false;
+        console.log(
+            '%c[WATCHDOG]%c Перезапуск завершен',
+            'color: #00C4B4; font-weight: bold;',
+            'color: #00C4B4;'
+        );
+        showNotification("Blocking logic restarted", 2000);
+    }, 1000);
+}
+
+// ============= end of Функция перезапуска логики блокировки ============= //
+
+
+// ============== Функция запуска watchdog ================== //
+
+function startWatchdog() {
+    let lastFailureTime = 0;
+    const maxFailureDuration = 30000; // 30 секунд
+    const baseInterval = getStorage('watchdogInterval', 10) * 1000;
+
+    const check = () => {
+        const currentTime = Date.now();
+        if (currentTime - lastCheckTime < 5000) return;
+        lastCheckTime = currentTime;
+
+        const isWorking = checkBlockingStatus();
+        const chatContainer = document.querySelector('.chat-scrollable-area__message-container') ||
+                             document.querySelector('.chat-room__content') ||
+                             document.querySelector('[data-a-target="chat-room-content"]') ||
+                             document.querySelector('. chat-line__message tw-relative') ||
+                             document.querySelector('.chat-list--default');
+
+        if (!isWorking || !chatContainer) {
+            console.log(
+                '%c[WATCHDOG]%c Обнаружен сбой в работе блокировки или контейнер чата не найден, перезапуск...',
+                'color: #FFA500; font-weight: bold;',
+                'color: #FFA500;'
+            );
+            lastFailureTime = lastFailureTime || currentTime;
+            restartBlockingLogic();
+
+            if (currentTime - lastFailureTime > maxFailureDuration) {
+                console.log(
+                    '%c[WATCHDOG]%c Сбой длится слишком долго, принудительный полный перезапуск...',
+                    'color: #FF0000; font-weight: bold;',
+                    'color: #FF0000;'
+                );
+                initBlocking();
+                startRootObserver(); // Перезапускаем наблюдение за корнем
+                lastFailureTime = 0;
+            }
+        } else {
+            lastFailureTime = 0;
+            console.log(
+                `%c[WATCHDOG] %cБлокировка работает корректно!`,
+                'color:rgb(6, 167, 0); font-weight: bold;',
+                'color: rgb(164, 207, 44);'
+            );
+        }
+    };
+
+    setInterval(() => {
+        const chatContainer = document.querySelector('.chat-scrollable-area__message-container, .chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote, .ffz--inline, chat-line__message tw-relative') ||
+                             document.querySelector('.chat-room__content');
+        if (!chatContainer) {
+            console.log("[WATCHDOG] Контейнер чата не найден, проверяем чаще");
+            check();
+        }
+    }, 1000); // Проверка каждую секунду, если контейнер отсутствует
+
+    setInterval(check, baseInterval);
+}
+
+// =================== end of Функция запуска watchdog =================== //
+
+// ============= Функция обработки изменения видимости вкладки handleVisibilityChange ====== //
+
+function handleVisibilityChange() {
+    document.addEventListener('visibilitychange', () => {
+        console.log("[Extension] Visibility changed:", document.visibilityState);
+        if (document.visibilityState === 'visible' && !observerIsActive) {
+            console.log("[Blocking] Tab became visible, restarting observation...");
+            observer.disconnect();
+            observeChatContainer();
+        }
+    });
+}
+
+// =================== end of обработки видимости вкладки handleVisibilityChange =================== //
+
+
+// ======= Новая функция для мониторинга смены канала monitorChannelChange ======= //
+let lastChannel = null;
+
+function monitorChannelChange() {
+    const checkChannel = () => {
+        const currentChannel = window.location.pathname.split('/')[1] || null;
+        if (currentChannel && currentChannel !== lastChannel) {
+            console.log(`[Blocking] Channel changed: ${lastChannel} -> ${currentChannel}`);
+            lastChannel = currentChannel;
+            restartBlockingLogic(); // Перезапускаем логику блокировки
+        }
+    };
+
+    // Проверяем изменение канала каждые 2 секунды
+    setInterval(checkChannel, 2000);
+
+    // Также реагируем на изменения URL
+    window.addEventListener('popstate', () => {
+        console.log("[Blocking] URL changed, checking channel...");
+        checkChannel();
+    });
+}
+
+// ======= end of мониторинг смены канала monitorChannelChange ======= //
+
+
+// Глобальная переменная для отслеживания активности наблюдателя
+
+// Глобальный observer для отслеживания изменений в чате
+function startRootObserver() {
+    let debounceTimeout = null;
+    const rootObserver = new MutationObserver((mutations) => {
+        // Дебouncing: обрабатываем изменения не чаще, чем раз в 100 мс
+        if (debounceTimeout) return;
+        debounceTimeout = setTimeout(() => {
+            console.log("[Blocking] RootObserver: Processing DOM changes, mutations count:", mutations.length);
+
+            // Проверяем наличие контейнера чата
+            const chatContainer = document.querySelector('.chat-scrollable-area__message-container') ||
+                                 document.querySelector('.chat-room__content') ||
+                                 document.querySelector('[data-a-target="chat-room-content"]') ||
+                                 document.querySelector('. chat-line__message tw-relative') ||
+                                 document.querySelector('.chat-list--default');
+
+            if (chatContainer && !observerIsActive) {
+                console.log("[Blocking] RootObserver: Chat container found, starting observation");
+                observeChatContainer();
+            } else if (!chatContainer) {
+                console.log("[Blocking] RootObserver: Chat container not found");
+                observerIsActive = false; // Сбрасываем флаг для перезапуска
+            }
+
+            debounceTimeout = null; // Сбрасываем таймер
+        }, 100); // Задержка 100 мс
+    });
+
+    // Наблюдаем за более специфичным элементом, если возможно
+    const rootElement = document.querySelector('.video-player') || document.body;
+    rootObserver.observe(rootElement, {
+        childList: true,
+        subtree: true
+    });
+    console.log("[Blocking] RootObserver started on:", rootElement === document.body ? 'document.body' : '.video-player');
+}
+// ========== end of startRootObserver ========== //
+
+
+// ======= Обработчик события видимости вкладки и вызов handleVisibilityChange ======= //
+
+ // document.addEventListener('visibilitychange', () => {  //
+   //  console.log("[Extension] Visibility changed:", document.visibilityState);  //
+// });  //
+
+// window.addEventListener('beforeunload', () => {
+   // console.log("[Extension] Page is unloading"); //
+// });  //
+
+// ======= Обработчик события видимости вкладки и вызов handleVisibilityChange ======= //
+
+// Глобальный observer для отслеживания изменений в чате
+let observer = new MutationObserver((mutations, obs) => {
+    console.log("[Observer] Mutations detected:", mutations.length);
+    processedEmotes = new WeakMap(); // Сбрасываем перед обработкой новых узлов
+    const chatContainer = document.querySelector('.chat-scrollable-area__message-container, .chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote, .ffz--inline, chat-line__message tw-relative') || document.querySelector('.chat-room__content');
+    if (chatContainer) {
+        toggleEmotesInNode(chatContainer);
+    } else {
+        console.log("[Observer] Chat container not found");
+    }
+});
+
+// Глобальные элементы UI
+let uiElements = null;
+
+// ============ Функция для генерации уникального ID ============= //
+function generateRandomID() {
+    const timestamp = Date.now().toString(36);
+    const randomStr = Array.from({ length: 68 - timestamp.length - 7 }, () => 
+        Math.random().toString(36).substring(2, 15)
+    ).join('').substring(0, 68 - timestamp.length - 7);
+    const id = `emote_${timestamp}_${randomStr}`;
+    console.log(`[GenerateID] Generated ID: ${id} (length: ${id.length})`);
+    return id;
+}
+// =========== end of generateRandomID ============ //
+
+
+// ============ Функция для отображения попапа выбора смайлов ============ //
+
+function showEmoteSelectionPopup(emotes, callback) {
+    console.log("[Content] Attempting to show emote selection popup with emotes:", emotes);
+
+    // Удаляем существующий попап
+    const existingPopup = document.getElementById('emote-selection-popup');
+    if (existingPopup) {
+        console.log("[Content] Removing existing popup");
+        existingPopup.remove();
+    }
+
+    // Создаем попап
+    const popup = document.createElement('div');
+    popup.id = 'emote-selection-popup';
+    popup.innerHTML = `
+        <div class="close-button">✕</div>
+        <div class="emote-options"></div>
+        
+    `;
+    document.body.appendChild(popup);
+    console.log("[Content] Popup element created and appended to body");
+
+    // Инлайн-стили (твои)
+    popup.style.position = 'fixed';
+    popup.style.background = 'rgb(56, 90, 80)';
+    popup.style.color = 'rgb(235, 235, 235)';
+    popup.style.fontWeight = 'bold';
+    popup.style.fontSize = '16px';
+    popup.style.border = '1px solid #12b6a7';
+    popup.style.borderRadius = '8px';
+    popup.style.padding = '10px';
+    popup.style.zIndex = '10001';
+    popup.style.maxWidth = '320px';
+    popup.style.maxHeight = '500px';
+    popup.style.overflowY = 'auto';
+    popup.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
+    popup.style.opacity = '0';
+    popup.style.transform = 'scale(0.9)';
+    popup.style.display = 'block';
+    popup.style.visibility = 'visible';
+
+    // Жёстко задаём left и top
+    popup.style.right = '310px';
+    popup.style.top = '385px'; // Измени на нужный top, например, '500px'
+    console.log("[Content] Popup positioned with inline styles:", { left: popup.style.left, top: popup.style.top });
+
+    const optionsContainer = popup.querySelector('.emote-options');
+
+    // Заполняем попап
+    emotes.forEach((emote, index) => {
+        const option = document.createElement('div');
+        option.className = 'emote-option';
+        option.style.display = 'flex';
+        option.style.alignItems = 'center';
+        option.style.padding = '8px';
+        option.style.borderBottom = '1px solid rgba(115, 209, 204, 0.66)';
+        option.innerHTML = `
+            <img src="${emote.src || ''}" alt="${emote.alt || 'Emote'}" style="width: 24px; height: 24px; margin-right: 10px;" />
+            <div class="emote-info" style="flex-grow: 1; font-size: 14px;">
+                <span>${emote.alt || 'Unnamed'} (${emote.platform})</span>
+            </div>
+            <button class="block-button" style="background: #ff5555; color: #ffffff; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Block</button>
+        `;
+        const blockButton = option.querySelector('.block-button');
+        blockButton.onclick = () => {
+            console.log("[Content] Block button clicked for emote:", emote);
+            callback(emote);
+            if (emote.element) {
+                emote.element.style.display = 'none';
+                console.log("[Content] Emote element hidden:", emote.alt);
+                const parentContainer = emote.element.closest('.ffz--inline, .chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote, .chat-line__message, .chat-image');
+                if (parentContainer) {
+                    const allEmotes = parentContainer.querySelectorAll('img.chat-line__message--emote, .ffz-emote, .seventv-emote, .bttv-emote, .twitch-emote, .chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote, .chat-image');
+                    const allBlocked = Array.from(allEmotes).every(e => e.style.display === 'none');
+                    if (allBlocked) {
+                        parentContainer.style.display = 'none';
+                        console.log("[Content] Parent container hidden as all emotes are blocked");
+                    }
+                }
+            }
+            popup.remove();
+        };
+        optionsContainer.appendChild(option);
+    });
+    console.log("[Content] Popup populated with", emotes.length, "emotes");
+
+    // Кнопка закрытия
+    popup.querySelector('.close-button').onclick = () => {
+        console.log("[Content] Emote selection popup closed via close button");
+        popup.remove();
+    };
+
+    // Проверка видимости
+    const computedStyle = window.getComputedStyle(popup);
+    if (computedStyle.display === 'none' || computedStyle.visibility === 'hidden') {
+        console.warn("[Content] Popup is not visible, forcing visibility");
+        popup.style.display = 'block';
+        popup.style.visibility = 'visible';
+    }
+
+    // Анимация
+    setTimeout(() => {
+        popup.classList.add('visible');
+        popup.style.opacity = '1';
+        popup.style.transform = 'scale(1)';
+        console.log("[Content] Popup visibility class and styles applied");
+    }, 10);
+
+    // Закрытие при клике вне
+    document.addEventListener('click', function closePopup(e) {
+        if (!popup.contains(e.target) && e.target !== popup) {
+            console.log("[Content] Closing popup due to outside click");
+            popup.remove();
+            document.removeEventListener('click', closePopup);
+        }
+    }, { capture: true, once: true });
+}
+
+// ============ end of showEmoteSelectionPopup ============ //
+
+// ========= Функция для блокировки эмодзи в узле =========== //
+// Используется в качестве обратного вызова для MutationObserver
+
+// Выбираем селектор для эмодзи 
+const EMOTE_SELECTOR = `
+    .chat-line__message img,
+    .chat-line__message .emote,
+    .chat-line__message .bttv-emote,
+    .chat-line__message .seventv-emote,
+    .chat-line__message .ffz-emote,
+    .chat-line__message .twitch-emote
+`;
+
+function toggleEmotesInNode(node, immediate = false) {
+    const startTime = performance.now();
+    try {
+        // Проверяем, что node находится в чате
+        if (!node.closest('.chat-scrollable-area__message-container, .ffz--inline, .chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote, chat-line__message tw-relative')) {
+            console.log("[Blocking] Node outside chat, skipping");
+            return;
+        }
+
+        const emotes = node.querySelectorAll(`
+            .chat-line__message img,
+            .chat-line__message .emote,
+            .chat-line__message .bttv-emote,
+            .chat-line__message .seventv-emote,
+            .chat-line__message .ffz-emote,
+            .chat-line__message .twitch-emote
+        `);
+        console.log(`[Blocking] Found ${emotes.length} emotes in chat node`);
+
+        // Функция для извлечения ID эмодзи из URL
+        const getEmoteId = (url) => {
+            if (url.includes('betterttv.net')) {
+                const match = url.match(/betterttv\.net\/emote\/([0-9a-f]{24})/);
+                return match ? match[1] : null;
+            } else if (url.includes('7tv.app')) {
+                const match = url.match(/7tv\.app\/emote\/([0-9a-f]{24})/);
+                return match ? match[1] : null;
+            }
+            return null;
+        };
+
+        for (const emote of emotes) {
+            const emoteUrl = emote.src || emote.getAttribute('srcset')?.split(' ')[0] || '';
+            const emoteAlt = emote.getAttribute('alt') || '';
+            const emoteId = emote.getAttribute('data-id') || emote.getAttribute('data-emote-id') || '';
+            const provider = emote.getAttribute('data-provider') || '';
+            let blockedEntry = null;
+
+            // Определяем платформу и ищем совпадение
+            if (emoteUrl.includes('7tv.app') || provider === '7tv') {
+                const emoteIdFromUrl = getEmoteId(emoteUrl);
+                blockedEntry = blockedEmotes.find(e => 
+                    e.platform === '7tv' && (
+                        e.emoteUrl === emoteUrl || 
+                        (emoteIdFromUrl && getEmoteId(e.emoteUrl) === emoteIdFromUrl)
+                    )
+                );
+            } else if (emoteUrl.includes('betterttv.net') || provider === 'bttv') {
+                const emoteIdFromUrl = getEmoteId(emoteUrl);
+                blockedEntry = blockedEmotes.find(e => 
+                    e.platform === 'bttTV' && (
+                        e.emoteUrl === emoteUrl || 
+                        (emoteIdFromUrl && getEmoteId(e.emoteUrl) === emoteIdFromUrl)
+                    )
+                );
+            } else if (emoteUrl.includes('frankerfacez.com') || provider === 'ffz') {
+                blockedEntry = blockedEmotes.find(e => e.platform === 'ffz' && e.emoteUrl === emoteUrl);
+            } else if (emoteUrl.includes('jtvnw.net') || emoteUrl.includes('twitchcdn.net') || provider === 'twitch') {
+                blockedEntry = blockedChannels.find(e => 
+                    e.platform === 'TwitchChannel' && 
+                    (
+                        e.emoteName.toLowerCase() === emoteAlt.toLowerCase() ||
+                        (e.prefix && emoteAlt.toLowerCase().startsWith(e.prefix.toLowerCase()))
+                    )
+                );
+                if (!blockedEntry && emoteId) {
+                    blockedEntry = blockedChannels.find(e => e.id === emoteId);
+                }
+            }
+
+            // Присваиваем data-emote-id, если нашли совпадение
+            if (blockedEntry && !emote.getAttribute('data-emote-id')) {
+                emote.setAttribute('data-emote-id', blockedEntry.id);
+            }
+
+            const emoteIdAssigned = emote.getAttribute('data-emote-id');
+            let shouldBeBlocked = false;
+
+            // Проверяем по ID
+            if (emoteIdAssigned && (blockedEmoteIDs.has(emoteIdAssigned) || blockedChannelIDs.has(emoteIdAssigned))) {
+                shouldBeBlocked = true;
+            } else if ((provider === 'twitch' || emoteUrl.includes('jtvnw.net') || emoteUrl.includes('twitchcdn.net')) && emoteAlt) {
+                shouldBeBlocked = blockedChannels.some(e => 
+                    e.platform === 'TwitchChannel' && 
+                    (
+                        e.emoteName.toLowerCase() === emoteAlt.toLowerCase() ||
+                        (e.prefix && emoteAlt.toLowerCase().startsWith(e.prefix.toLowerCase()))
+                    )
+                );
+            }
+
+            const isBlocked = isBlockingEnabled && shouldBeBlocked;
+            emote.style.display = isBlocked ? 'none' : '';
+
+            // Логируем только заблокированные эмодзи или в дебаг-режиме
+            if (isBlocked) {
+                console.log(`[Blocking] Emote ${emoteAlt || emoteUrl} (ID: ${emoteIdAssigned || emoteId || 'none'}, Provider: ${provider}) hidden`);
+            }
+        }
+
+        console.log(`[Blocking] toggleEmotesInNode took ${performance.now() - startTime} ms`);
+    } catch (error) {
+        console.error("[Blocking] Error in toggleEmotesInNode:", error);
+    }
+}
+
+// ========= end of toggleEmotesInNode =========== //
+
+ // Добавляем функцию после объявления toggleEmotesInNode
+     
+// =================== Функция мониторинга случая сброса чата monitorChatReset ================== //
+ function monitorChatReset() {
+    const chatSelectors = [
+        '.chat-scrollable-area__message-container',
+        ' chat-line__message tw-relative',
+        '.chat-room__content',
+        '[data-a-target="chat-room-content"]',
+        '.chat-list--default',
+        '.chat-container',
+        '[data-test-selector="chat-room-component-layout"]',
+        '[data-a-target="chat-container"]',
+        '.chat-list__list'
+    ];
+
+    const connectionMessageSelectors = [
+        '[data-a-target="chat-connection-message"]',
+        '.chat-connection-message',
+        '[data-test-selector="chat-connection-message"]',
+        '.chat-status-message',
+        ' chat-line__message tw-relative',
+        '.chat-line__status'
+    ];
+
+    let lastMessageCount = 0;
+    let isChatResetting = false;
+
+    const findChatContainer = () => {
+        return chatSelectors.reduce((found, sel) => found || document.querySelector(sel), null);
+    };
+
+    const findConnectionMessage = () => {
+        return connectionMessageSelectors.reduce((found, sel) => found || document.querySelector(sel), null);
+    };
+
+    const resetBlockingLogic = () => {
+        if (isChatResetting) return;
+        isChatResetting = true;
+
+        if (isLoggingEnabled()) {
+            console.log(
+                '%c[ChatReset]%c Chat reset detected, restarting blocking logic...',
+                'color: #FF4500; font-weight: bold;',
+                'color: #FF4500;'
+            );
+        }
+        showNotification("Chat reset detected, restarting blocking...", 2000);
+
+        // Останавливаем текущий наблюдатель
+        observer.disconnect();
+        observerIsActive = false;
+
+        // Сбрасываем кэш обработанных узлов
+        processedEmotes = new WeakMap();
+        processedNodes = new WeakSet();
+
+        // Немедленно ищем контейнер чата
+        const chatContainer = findChatContainer();
+        if (chatContainer) {
+            if (isLoggingEnabled()) {
+                console.log("[ChatReset] Chat container found, applying blocking...");
+            }
+            toggleEmotesInNode(chatContainer, true);
+            observer.observe(chatContainer, {
+                childList: true,
+                subtree: true,
+                attributes: false
+            });
+            observerIsActive = true;
+        } else {
+            if (isLoggingEnabled()) {
+                console.log("[ChatReset] Chat container not found, starting root observer...");
+            }
+            startRootObserver();
+        }
+
+        setTimeout(() => {
+            isChatResetting = false;
+            if (isLoggingEnabled()) {
+                console.log(
+                    '%c[ChatReset]%c Blocking logic restarted',
+                    'color: #00C4B4; font-weight: bold;',
+                    'color: #00C4B4;'
+                );
+            }
+            showNotification("Blocking logic restarted", 1500);
+        }, 500);
+    };
+
+    const checkChatState = () => {
+        const chatContainer = findChatContainer();
+        if (!chatContainer) {
+            if (isLoggingEnabled()) {
+                console.log("[ChatReset] Chat container not found, triggering reset...");
+            }
+            resetBlockingLogic();
+            return;
+        }
+
+        // Проверяем наличие сообщения о подключении
+        const connectionMessage = findConnectionMessage();
+        if (connectionMessage && connectionMessage.textContent.toLowerCase().includes('connecting to chat')) {
+            if (isLoggingEnabled()) {
+                console.log("[ChatReset] Detected 'Connecting to chat' message, triggering reset...");
+            }
+            resetBlockingLogic();
+            return;
+        }
+
+        // Проверяем количество сообщений
+        const messages = chatContainer.querySelectorAll('.chat-line__message, .chat-message');
+        const currentMessageCount = messages.length;
+
+        if (currentMessageCount === 0 && lastMessageCount > 0) {
+            if (isLoggingEnabled()) {
+                console.log("[ChatReset] Chat cleared (no messages), triggering reset...");
+            }
+            resetBlockingLogic();
+        } else if (currentMessageCount > 0 && lastMessageCount === 0) {
+            if (isLoggingEnabled()) {
+                console.log("[ChatReset] New messages appeared after clear, applying blocking...");
+            }
+            toggleEmotesInNode(chatContainer, true);
+        }
+
+        lastMessageCount = currentMessageCount;
+    };
+
+    // Наблюдатель за изменениями в DOM для сообщений о подключении
+    const connectionObserver = new MutationObserver((mutations) => {
+        const connectionMessage = findConnectionMessage();
+        if (connectionMessage && connectionMessage.textContent.toLowerCase().includes('connecting to chat')) {
+            if (isLoggingEnabled()) {
+                console.log("[ChatReset] Mutation detected 'Connecting to chat', triggering reset...");
+            }
+            resetBlockingLogic();
+        }
+    });
+
+    connectionObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-a-target', 'class']
+    });
+
+    // Периодическая проверка состояния чата
+    setInterval(checkChatState, 500); // Проверяем каждые 0.5 секунды
+
+    // Реакция на смену канала
+    let lastPathname = window.location.pathname;
+    const checkChannelChange = () => {
+        const currentPathname = window.location.pathname;
+        if (currentPathname !== lastPathname) {
+            if (isLoggingEnabled()) {
+                console.log(`[ChatReset] Channel changed: ${lastPathname} -> ${currentPathname}, triggering reset...`);
+            }
+            lastPathname = currentPathname;
+            resetBlockingLogic();
+        }
+    };
+    setInterval(checkChannelChange, 500);
+
+    if (isLoggingEnabled()) {
+        console.log("[ChatReset] Started monitoring chat reset");
+    }
+}
+
+// =================== end of Функция мониторинга сброса чата monitorChatReset ================== //
+
+// =================== Функция инициализации блокировки initBlocking ================== //
+// Функция инициализации блокировки
+
+function initBlocking() {
+    console.log("[Blocking] Initializing...");
+    try {
+        blockedEmotes = getStorage('blockedEmotes', []);
+        let rawBlockedChannels = getStorage('blockedChannels', []);
+
+        blockedChannels = rawBlockedChannels.map(item => {
+            if (item.channelName && item.prefix) return item;
+            const prefix = item.name || item.emoteName.split(/[^a-zA-Z0-9]/)[0] || item.emoteName;
+            return {
+                id: item.id,
+                channelName: prefix,
+                prefix: prefix,
+                platform: item.platform,
+                emoteName: item.emoteName || item.name || 'Unnamed',
+                date: item.date
+            };
+        });
+
+        isBlockingEnabled = getStorage('isBlockingEnabled', true);
+        blockedEmoteIDs = new Set(blockedEmotes.map(emote => emote.id));
+        blockedChannelIDs = new Set(blockedChannels.map(channel => channel.id));
+        console.log("[Blocking] Loaded:", {
+            blockedEmotes: blockedEmotes.length,
+            blockedChannels: blockedChannels.length,
+            isBlockingEnabled
+        });
+
+        setStorage('blockedChannels', blockedChannels);
+        toggleEmotesInChat(true);
+        startWatchdog();
+        handleVisibilityChange();
+        startRootObserver();
+        monitorChannelChange();
+        monitorChatReset();
+console.log("[Content] Chat reset monitor started");
+        // Запускаем наблюдение за изменениями в чате
+        observeChatContainer();
+        // Запускаем мониторинг смены канала
+
+        // Резервная проверка чата
+        setInterval(() => {
+            if (!observerIsActive) {
+                if (isLoggingEnabled()) {
+                    console.log("[Blocking] Force checking chat...");
+                }
+                const chatContainer = document.querySelector(
+                    '.chat-scrollable-area__message-container, .chat-room__content, [data-a-target="chat-room-content"], .chat-list--default, .chat-container, [data-a-target="chat-container"], .chat-list__list'
+                );
+                if (chatContainer) {
+                    if (isLoggingEnabled()) {
+                        console.log("[Blocking] Force check found chat, restarting observer...");
+                    }
+                    observerIsActive = false;
+                    observeChatContainer();
+                }
+            }
+        }, 5000); // Каждые 5 секунд
+
+        console.log("[Content] Initialization complete");
+    } catch (error) {
+        console.error("[Content] Initialization error:", error);
+    }
+}
+
+window.debugBlocking = () => {
+    const chatContainer = document.querySelector(
+        '.chat-scrollable-area__message-container, .chat-room__content, .chat-line__message, [tw-relative="chat-line__message"], [data-a-target="chat-room-content"], .chat-list--default, .chat-container, [data-a-target="chat-container"], .chat-list__list'
+    );
+    const emotes = chatContainer ? chatContainer.querySelectorAll(
+        '.chat-line__message img, .chat-message-emote, [data-a-target="emote"], [data-test-selector="emote"], .seventv-emote, .bttv-emote, .ffz-emote'
+    ) : [];
+    console.log("[Debug] Blocking state:", {
+        isBlockingEnabled,
+        observerIsActive,
+        chatContainerFound: !!chatContainer,
+        emoteCount: emotes.length,
+        sampleEmotes: Array.from(emotes).slice(0, 3).map(e => ({
+            src: e.src,
+            alt: e.getAttribute('alt') || e.getAttribute('data-emote-name') || e.getAttribute('title') || '',
+            id: e.getAttribute('data-emote-id') || e.getAttribute('data-id') || ''
+        })),
+        blockedEmoteIDs: [...blockedEmoteIDs],
+        blockedChannelIDs: [...blockedChannelIDs]
+    });
+
+    if (chatContainer) {
+        console.log("[Debug] Forcing toggleEmotesInChat...");
+        toggleEmotesInChat(true);
+    } else {
+        console.log("[Debug] Chat container not found, restarting observer...");
+        observerIsActive = false;
+        observer.disconnect();
+        startRootObserver();
+    }
+};
+
+// =================== end of Функция инициализации блокировки initBlocking ================== //
+
+
+// =========== наблюдение за изменениями в чате observeChatContainer =========== //
+
+function observeChatContainer() {
+    const selectors = [
+        '.chat-scrollable-area__message-container',
+        '.chat-room__content',
+        '[data-a-target="chat-room-content"]',
+        '.chat-list--default',
+        '. chat-line__message tw-relative',
+        '.chat-container' // Добавлен дополнительный селектор
+    ];
+
+    const findContainer = () => {
+        return selectors.reduce((found, selector) => found || document.querySelector(selector), null);
+    };
+
+    let chatContainer = findContainer();
+    if (chatContainer) {
+        console.log("[Blocking] Chat container found:", chatContainer);
+        observer.disconnect();
+        observer.observe(chatContainer, {
+            childList: true,
+            subtree: true,
+            attributes: false
+        });
+        toggleEmotesInNode(chatContainer);
+        observerIsActive = true;
+        retryCount = 0; // Сбрасываем счетчик попыток
+    } else {
+        retryCount++;
+        if (retryCount < maxRetries) {
+            console.warn(`[Blocking] Chat container not found, retrying (${retryCount}/${maxRetries})...`);
+            setTimeout(observeChatContainer, 1000); // Увеличена задержка до 1 секунды
+        } else {
+            console.error("[Blocking] Max retries reached, starting root observer...");
+            observerIsActive = false;
+            startRootObserver(); // Перезапускаем наблюдение за корнем
+        }
+    }
+}
+
+// =========== end of   observeChatContainer =========== //
+
+
+// ========= наблюдение за корнем body документа ======== //
+
+function startRootObserver() {
+    let debounceTimeout = null;
+    const rootObserver = new MutationObserver((mutations) => {
+        if (debounceTimeout) return;
+        debounceTimeout = setTimeout(() => {
+            console.log("[Blocking] RootObserver: Processing DOM changes, mutations count:", mutations.length);
+            const chatContainer = document.querySelector('.chat-scrollable-area__message-container') ||
+                                 document.querySelector('.chat-room__content') ||
+                                 document.querySelector('[data-a-target="chat-room-content"]') ||
+                                 document.querySelector('.chat-list--default');
+            if (chatContainer && !observerIsActive) {
+                console.log("[Blocking] RootObserver: Chat container found, starting observation");
+                observeChatContainer();
+            } else if (!chatContainer) {
+                console.log("[Blocking] RootObserver: Chat container not found");
+                observerIsActive = false;
+            }
+            debounceTimeout = null;
+        }, 200); // Увеличена задержка до 200 мс
+    });
+
+    const rootElement = document.querySelector('.video-player') || document.body;
+    rootObserver.observe(rootElement, {
+        childList: true,
+        subtree: true
+    });
+    console.log("[Blocking] RootObserver started on:", rootElement === document.body ? 'document.body' : '.video-player');
+}
+
+// Запускаем наблюдение за корнем body документа === //
+// ============ end of observeChatContainer  ============ // 
+
+// ======= Флаг для контроля активации
+let observerIsActive = false;
+
+// ======== Функция для добавления эмодзи или канала addEmoteOrChannel ======== //
+
+function addEmoteOrChannel(emotePrefix, platform, emoteName, emoteUrl, targetElement = null, isExactMatch = false) {
+    console.log("[Blocking] Adding emote/channel:", { emotePrefix, platform, emoteName, emoteUrl, isExactMatch });
+    const emoteId = generateRandomID();
+    const currentDateTime = new Date().toISOString();
+    let prefix = '';
+
+    let finalEmoteUrl = emoteUrl;
+    if (platform === 'bttTV' && emoteUrl && !emoteUrl.match(/\/\dx\.webp$/)) {
+        finalEmoteUrl = `${emoteUrl}/2x.webp`;
+    } else if (platform === '7tv' && emoteUrl && !emoteUrl.match(/\/\dx\.webp$/)) {
+        finalEmoteUrl = `${emoteUrl}/2x.webp`;
+    }
+
+    let emoteIdFromUrl = null;
+    if (platform === 'bttTV' && finalEmoteUrl) {
+        const urlParts = finalEmoteUrl.split('/');
+        emoteIdFromUrl = urlParts.find(part => /^[0-9a-f]{24}$/.test(part));
+    } else if (platform === '7tv' && finalEmoteUrl) {
+        const urlParts = finalEmoteUrl.split('/');
+        emoteIdFromUrl = urlParts.find(part => /^[0-9a-f]{24}$/.test(part));
+    }
+
+    const isDuplicate = platform === 'TwitchChannel'
+        ? blockedChannels.some(e => e.emoteName === emoteName && e.platform === platform)
+        : blockedEmotes.some(e => e.emoteUrl === finalEmoteUrl && e.emoteName === emoteName && e.platform === platform);
+
+    if (isDuplicate) {
+        console.log(`[Blocking] Duplicate found: ${emoteName}`);
+        return null;
+    }
+
+    let newEntry;
+    if (platform === 'TwitchChannel') {
+        if (isExactMatch) {
+            prefix = emoteName;
+        } else {
+            const match = emoteName.match(/^([a-z0-9]+)/);
+            prefix = match ? match[1] : emoteName;
+        }
+
+        newEntry = {
+            id: emoteId,
+            channelName: prefix,
+            prefix: prefix,
+            platform,
+            emoteName: emoteName || 'Unnamed',
+            date: currentDateTime
+        };
+
+        blockedChannels.push(newEntry);
+        blockedChannelIDs.add(emoteId);
+        newlyAddedIds.add(emoteId);
+        setStorage('blockedChannels', blockedChannels);
+    } else {
+        newEntry = {
+            id: emoteId,
+            name: emoteName || emotePrefix || 'Unnamed',
+            platform,
+            emoteName: emoteName || 'Unnamed',
+            emoteUrl: finalEmoteUrl,
+            date: currentDateTime
+        };
+
+        blockedEmotes.push(newEntry);
+        blockedEmoteIDs.add(emoteId);
+        newlyAddedIds.add(emoteId);
+        setStorage('blockedEmotes', blockedEmotes);
+    }
+
+    if (targetElement) {
+        targetElement.setAttribute('data-emote-id', emoteId);
+        targetElement.style.display = 'none';
+    }
+
+    processedEmotes = new WeakMap();
+    toggleEmotesInChat(true);
+
+    if (uiElements && uiElements.blockedList) {
+        updateBlockedList(uiElements.blockedList, getBlockedItems());
+        // Прокручиваем к последнему элементу, если панель открыта
+        const isPanelOpen = uiElements.blockedList.offsetParent !== null; // Проверяем видимость
+        if (isPanelOpen) {
+            goToLastAddedItem();
+        }
+    }
+    if (uiElements && uiElements.counter) {
+        updateCounter(uiElements.counter);
+    }
+
+    return newEntry;
+}
+
+// ======== end of addEmoteOrChannel Функции ======== //
+
+// ========= Функция для удаления эмодзи или канала removeEmoteOrChannel ======== //
+
+function removeEmoteOrChannel(id) {
+    console.log(`[Blocking] Removing emote/channel: ${id}`);
+    try {
+        let removed = false;
+
+        const emoteIndex = blockedEmotes.findIndex(e => e.id === id);
+        if (emoteIndex !== -1) {
+            blockedEmotes.splice(emoteIndex, 1);
+            blockedEmoteIDs.delete(id);
+            newlyAddedIds.delete(id);
+            setStorage('blockedEmotes', blockedEmotes);
+            removed = true;
+        }
+
+        const channelIndex = blockedChannels.findIndex(c => c.id === id);
+        if (channelIndex !== -1) {
+            blockedChannels.splice(channelIndex, 1);
+            blockedChannelIDs.delete(id);
+            newlyAddedIds.delete(id);
+            setStorage('blockedChannels', blockedChannels);
+            removed = true;
+        }
+
+        if (removed) {
+            processedEmotes = new WeakMap();
+            toggleEmotesInChat(true);
+            if (uiElements && uiElements.blockedList) {
+                updateBlockedList(uiElements.blockedList, getBlockedItems());
+                // Прокручиваем к последнему элементу после добавления
+                goToLastAddedItem();
+            }
+        
+            if (uiElements && uiElements.counter) {
+                updateCounter(uiElements.counter);
+            }
+        }
+    } catch (error) {
+        console.error("[Blocking] Error removing emote/channel:", error);
+    }
+}
+
+// ======== end of removeEmoteOrChannel ======== //
+
+
+ 
+
+ // ======== Функция для получения заблокированных элементов getBlockedItems ======== //
+function getBlockedItems() {
+    return { blockedEmotes, blockedChannels, newlyAddedIds };
+}
+
+// ======== end of getBlockedItems ======== //
+
+// ============= Интерфейс Панели управления ui.js =============== //
+// Функция для создания пользовательского интерфейса
+
+function createUI() {
+    if (window.location.href.includes('player.twitch.tv') || 
+        (window.location.href.includes('twitch.tv/embed') && !window.location.href.includes('popout'))) {
+        console.log("[UI] Skipping UI creation in embedded iframe");
+        return null;
+    }
+
+    console.log("[UI] Creating control panel and button...");
+    const controlPanelHtml = `
+   <div id="control-panel">
+    <div class="resize-handle top"></div>
+    <div class="resize-handle bottom"></div>
+    <div class="resize-handle left"></div>
+    <div class="resize-handle right"></div>
+    <div class="resize-handle top-left"></div>
+    <div class="resize-handle top-right"></div>
+    <div class="resize-handle bottom-left"></div>
+    <div class="resize-handle bottom-right"></div>
+    <div class="version-label">v.2.6.55 (C) tapeavion </div>
+    <h4 class="title">List of Blocked Emotes</h4>
+    <div id="sortContainer"></div>
+    <ul id="blocked-list" style="overflow-y: auto; position: relative;">
+    <div class="blocked-list-container" style="position: relative;"></div>
+</ul>
+    <div class="input-container">
+        <select id="platform-select">
+            <option value="TwitchChannel">TwitchChannel</option>
+            <option value="7tv">7tv</option>
+            <option value="bttTV">bttTV</option>
+            <option value="ffz">ffz</option>
+        </select>
+        <input type="text" id="add-input" placeholder="add channel/emote">
+        <button id="add-button">Add it</button>
+    </div>
+    <div class="button-container">
+        <button id="clear-all-button">Delete All</button>
+        <button id="export-button">Export</button>
+        <button id="import-button">Import</button>
+         <button id="toggle-logging-button" class="${isLoggingEnabled() ? 'active' : ''}">
+                    ${isLoggingEnabled() ? 'Logging On' : 'Logging Off'}
+                </button>
+        <button id="unblock-all-button">Disable Blocking</button>
+        <button id="block-all-button">Enable Blocking</button>
+          <button id="reset-search-button" class="reset-search-button">Reset search results </button>
+        <button id="show-stats-button">Show Stats Chart</button>
+    </div>
+            <div class="search-input">
+        <input type="text" id="search-input" placeholder="Search in blocked list...">
+        <button id="search-button">Search</button>
+    </div>
+    <div class="theme-selector-container">
+    <select id="theme-select">
+    <option value="default">Default Theme</option>
+        <option value="glassmorphism">Glassmorphism Theme</option>
+        <option value="dark">Dark Theme</option>
+        <option value="sapphireBlue">Blue Sapphire </option>
+        <option value="darkRaspberry">Dark Raspberry Theme</option>
+        <option value="lightMode">Light Mode</option>
+        <option value="deepSeaTurquoise">Deep Sea Turquoise</option>
+        <option value="amberBlaze">Amber Blaze</option>
+        <option value="amethystGlow">Amethyst Glow</option>
+    </select>
+    </div>
+    <div id="chart-modal" style="display: none;">
+    <div class="chart-container">
+            <button id="close-chart-button">Close</button>
+            <canvas id="stats-chart"></canvas>
+        </div>
+    </div>
+    <div id="counter"></div>
+</div>
+<div id="open-panel-container">
+    <span id="open-panel-label"></span>
+    <div id="open-panel-button"></div>
+</div>
+    `;
+
+    const container = document.createElement('div');
+    container.innerHTML = controlPanelHtml;
+    document.body.appendChild(container);
+    console.log("[UI] Control panel and button container appended to DOM");
+
+    const newButtonHtml = `
+        <div class="Layout-sc-1xcs6mc-0">
+            <div class="InjectLayout-sc-1i43xsx-0 kBtJDm">
+                <button class="ScCoreButton-sc-ocjdkq-0 kIbAir ScButtonIcon-sc-9yap0r-0 eSFFfM" aria-label="Custom Action" data-a-target="custom-button">
+                    <div class="ButtonIconFigure-sc-1emm8lf-0 buvMbr">
+                        <div class="ScSvgWrapper-sc-wkgzod-0 jHiZwZ tw-svg">
+                            <svg width="20" height="20" viewBox="0 0 20 20" focusable="false" aria-hidden="true" role="presentation">
+                                <path fill-rule="evenodd" d="M10 2a8 8 0 100 16 8 8 0 000-16zm0 14a6 6 0 110-12 6 6 0 010 12zm-1-6a1 1 0 112 0v3a1 1 0 11-2 0v-3zm0-3a1 1 0 112 0 1 1 0 01-2 0z" clip-rule="evenodd"></path>
+                            </svg>
+                        </div>
+                    </div>
+                </button>
+            </div>
+        </div>
+    `;
+
+    const targetContainer = document.querySelector('.Layout-sc-1xcs6mc-0.czRfnU');
+    if (targetContainer) {
+        targetContainer.insertAdjacentHTML('beforeend', newButtonHtml);
+        console.log("[UI] Custom button added next to 'Go Ad-Free for Free'");
+    } else {
+        console.warn("[UI] Target container for custom button not found");
+    }
+
+    let themeStylesheet = document.getElementById('theme-stylesheet');
+    if (!themeStylesheet) {
+        themeStylesheet = document.createElement('link');
+        themeStylesheet.id = 'theme-stylesheet';
+        themeStylesheet.rel = 'stylesheet';
+        document.head.appendChild(themeStylesheet);
+        console.log("[UI] Theme stylesheet added to <head>");
+    }
+
+    const controlPanel = document.getElementById('control-panel');
+    const sortContainer = document.getElementById('sortContainer');
+    const counter = document.getElementById('counter');
+    const openPanelContainer = document.getElementById('open-panel-container');
+    const openPanelLabel = document.getElementById('open-panel-label');
+    const openPanelButton = document.getElementById('open-panel-button');
+
+    let currentSortOrder = { name: 'asc', platform: 'asc', date: 'asc' };
+
+    const sortByNameButton = document.createElement('button');
+    sortByNameButton.innerHTML = 'Name ▲';
+    sortByNameButton.style.cssText = 'cursor: pointer; margin-right: 10px;';
+    sortByNameButton.onclick = () => {
+        const order = currentSortOrder.name === 'asc' ? 'desc' : 'asc';
+        currentSortOrder.name = order;
+        sortByNameButton.innerHTML = `Name ${order === 'asc' ? '▲' : '▼'}`;
+        sortblockedEmotes('name', order);
+    };
+    sortContainer.appendChild(sortByNameButton);
+
+    const sortByPlatformButton = document.createElement('button');
+    sortByPlatformButton.innerHTML = 'Platform ▲';
+    sortByPlatformButton.style.cssText = 'cursor: pointer; margin-right: 10px;';
+    sortByPlatformButton.onclick = () => {
+        const order = currentSortOrder.platform === 'asc' ? 'desc' : 'asc';
+        currentSortOrder.platform = order;
+        sortByPlatformButton.innerHTML = `Platform ${order === 'asc' ? '▲' : '▼'}`;
+        sortblockedEmotes('platform', order);
+    };
+    sortContainer.appendChild(sortByPlatformButton);
+
+    const sortByDateButton = document.createElement('button');
+    sortByDateButton.innerHTML = 'Date-Time ▲';
+    sortByDateButton.style.cssText = 'cursor: pointer; margin-right: 10px;';
+    sortByDateButton.onclick = () => {
+        const order = currentSortOrder.date === 'asc' ? 'desc' : 'asc';
+        currentSortOrder.date = order;
+        sortByDateButton.innerHTML = `Date ${order === 'asc' ? '▲' : '▼'}`;
+        sortblockedEmotes('date', order);
+    };
+    sortContainer.appendChild(sortByDateButton);
+
+    const goToLastButton = document.createElement('button');
+    goToLastButton.innerHTML = 'Go To Last Element ▼';
+    goToLastButton.style.cssText = 'cursor: pointer;';
+    goToLastButton.onclick = goToLastAddedItem;
+    sortContainer.appendChild(goToLastButton);
+
+    const isVisible = getStorage('panelVisible', false);
+    console.log("[UI] Panel visibility state:", isVisible);
+    controlPanel.classList.toggle('visible', isVisible);
+    openPanelButton.classList.toggle('active', isVisible); // Set initial switch state
+    openPanelLabel.textContent = isVisible ? 'Close Panel' : 'Open Panel'; // Set initial label
+    openPanelContainer.setAttribute('aria-label', isVisible ? 'Close control panel' : 'Open control panel'); // Accessibility
+    openPanelContainer.title = isVisible ? 'Close control panel' : 'Open control panel'; // Tooltip
+
+    openPanelContainer.addEventListener('click', () => {
+        console.log("[UI] Open panel container clicked");
+        const isVisible = controlPanel.classList.contains('visible');
+        controlPanel.classList.toggle('visible', !isVisible);
+        openPanelButton.classList.toggle('active', !isVisible); // Toggle switch state
+        openPanelLabel.textContent = isVisible ? 'Open Panel' : 'Close Panel'; // Update label
+        openPanelContainer.setAttribute('aria-label', isVisible ? 'Open control panel' : 'Close control panel'); // Update accessibility
+        openPanelContainer.title = isVisible ? 'Open control panel' : 'Close control panel'; // Update tooltip
+        setStorage('panelVisible', !isVisible);
+    });
+
+    makePanelDraggable(controlPanel);
+    makePanelResizable(controlPanel);
+
+    return {
+        controlPanel, 
+        blockedList: document.getElementById('blocked-list'), 
+        addInput: document.getElementById('add-input'),
+        addButton: document.getElementById('add-button'),
+        clearAllButton: document.getElementById('clear-all-button'),
+        exportButton: document.getElementById('export-button'),
+        importButton: document.getElementById('import-button'),
+        toggleLoggingButton: document.getElementById('toggle-logging-button'), // Новая кнопка
+        unblockAllButton: document.getElementById('unblock-all-button'),
+        blockAllButton: document.getElementById('block-all-button'),
+        showStatsButton: document.getElementById('show-stats-button'),   
+        openPanelButton,
+        counter,
+        searchInput: document.getElementById('search-input'),
+        searchButton: document.getElementById('search-button'),
+        resetSearchButton: document.getElementById('reset-search-button'), 
+        platformSelect: document.getElementById('platform-select'),
+        themeSelect: document.getElementById('theme-select'),
+        chartModal: document.getElementById('chart-modal'),
+        statsChart: document.getElementById('stats-chart'),
+        closeChartButton: document.getElementById('close-chart-button')
+    };
+}
+
+// ==================== end of createUI ================== //
+
+
+// ============== makePanelResizable ================ // 
+// Функция   изменения размеров панели
+
+function makePanelResizable(panel) {
+    console.log("[UI] Setting up resizable panel...");
+
+    const handles = panel.querySelectorAll('.resize-handle');
+    let isResizing = false;
+    let currentHandle = null;
+    let startX, startY, startWidth, startHeight, startLeft;
+
+// Функция для обновления позиций и размеров элементов
+function updateChildElements() {
+    const panelWidth = panel.offsetWidth;
+    const panelHeight = panel.offsetHeight;
+
+    // Устанавливаем CSS-переменные для адаптивности
+    panel.style.setProperty('--panel-width', `${panelWidth}px`);
+    panel.style.setProperty('--panel-height', `${panelHeight}px`);
+
+    // Проверяем ширину панели для скрытия/показа инпутов
+    const isNarrow = panelWidth <= 200; // Панель сжата до 200px или меньше
+
+    // Обновляем ширину #sortContainer
+    const sortContainer = document.getElementById('sortContainer');
+    if (sortContainer) {
+        sortContainer.style.width = `${panelWidth - 225}px`; // Совпадает с #blocked-list
+    }
+
+    // Обновляем размеры #blocked-list
+    const blockedList = document.getElementById('blocked-list');
+    if (blockedList) {
+        const reservedHeight = 250; // Пространство для заголовка, сортировщика, кнопок и отступов
+        blockedList.style.width = `${panelWidth - 225}px`; // Учитываем кнопки справа
+        blockedList.style.height = `${Math.max(30, panelHeight - reservedHeight)}px`; // Минимум 30px
+    }
+
+    // Обновляем позицию и ширину .theme-selector-container
+    const themeSelectorContainer = panel.querySelector('.theme-selector-container');
+    if (themeSelectorContainer) {
+        const baseBottomTheme = 130 - 30; // Уменьшаем на 30px
+        const minBottom = 90; // Минимальное расстояние от низа
+        themeSelectorContainer.style.bottom = `${Math.max(minBottom, baseBottomTheme * (panelHeight / 735))}px`;
+        themeSelectorContainer.style.left = `10px`;
+        themeSelectorContainer.style.width = `150px`;
+        // Добавляем/удаляем класс hidden
+        themeSelectorContainer.classList.toggle('hidden', isNarrow);
+
+        const themeSelect = themeSelectorContainer.querySelector('#theme-select');
+        if (themeSelect) {
+            const selectWidth = 145;
+            themeSelect.style.width = `${selectWidth}px`;
+        }
+    }
+
+    // Обновляем позицию и ширину .search-input
+const searchInput = panel.querySelector('.search-input');
+if (searchInput) {
+    const baseBottomSearch = 130 - 30; // Уменьшаем на 30px
+    const minBottom = 90; // Минимальное расстояние от низа
+    searchInput.style.bottom = `${Math.max(minBottom, baseBottomSearch * (panelHeight / 735))}px`;
+    searchInput.style.left = `165px`; // отступ от левого края
+    searchInput.style.width = `${panelWidth - 377}px`;
+    searchInput.classList.toggle('hidden', isNarrow);
+
+    const searchInputField = searchInput.querySelector('#search-input');
+    const searchButton = searchInput.querySelector('#search-button');
+    if (searchInputField && searchButton) {
+        const buttonWidth = 80;
+        const gap = 10;
+        searchInputField.style.width = `${panelWidth - 290 - buttonWidth - gap}px`;
+        searchButton.style.width = `${buttonWidth}px`;
+        searchButton.style.flexShrink = `0`; // Запрещаем сжатие
+        searchButton.style.boxSizing = `border-box`; // Учитываем padding и border
+    }
+}
+
+// Обновляем позицию и ширину .input-container
+const inputContainer = panel.querySelector('.input-container');
+if (inputContainer) {
+    const baseBottomInput = 90 - 30; // Уменьшаем на 30px
+    const minBottom = 10; // Минимальное расстояние от низа
+    inputContainer.style.bottom = `${Math.max(minBottom, baseBottomInput * (panelHeight / 735))}px`;
+    inputContainer.style.left = `10px`;
+    inputContainer.style.width = `${panelWidth - 222}px`;
+    inputContainer.classList.toggle('hidden', isNarrow);
+
+    const platformSelect = inputContainer.querySelector('#platform-select');
+    const addInput = inputContainer.querySelector('#add-input');
+    const addButton = inputContainer.querySelector('#add-button');
+    if (platformSelect && addInput && addButton) {
+        const selectWidth = 150;
+        const buttonWidth = 80;
+        const gap = 10;
+        platformSelect.style.width = `${selectWidth}px`;
+        addButton.style.width = `${buttonWidth}px`;
+        addButton.style.flexShrink = `0`; // Запрещаем сжатие
+        addButton.style.boxSizing = `border-box`; // Учитываем padding и border
+        addInput.style.width = `${panelWidth - 180 - selectWidth - buttonWidth - 2 * gap}px`;
+    }
+}
+
+        // Обновляем позицию и размеры .button-container
+        const buttonContainer = panel.querySelector('.button-container');
+        if (buttonContainer) {
+            const reservedHeight = 250; // Синхронизируем с #blocked-list
+            const maxButtonContainerWidth = 180; // 185 - 10px (right) - 10px (отступ от #blocked-list)
+            buttonContainer.style.width = `${Math.max(180, Math.min(maxButtonContainerWidth, panelWidth * 0.25))}px`; // Ограничиваем ширину
+            buttonContainer.style.height = `${Math.max(30, panelHeight - reservedHeight)}px`; // Такая же высота, как у #blocked-list
+            buttonContainer.style.maxHeight = `calc(${panelHeight}px - 100px)`; // Сохраняем maxHeight
+            buttonContainer.style.bottom = `${Math.max(100, 155 * (panelHeight / 735))}px`; // Сохраняем bottom
+            buttonContainer.style.right = `10px`; // Позиционируем справа
+            buttonContainer.style.top = `61px`; // Синхронизируем с #blocked-list
+            buttonContainer.style.display = `flex`;
+            buttonContainer.style.flexDirection = `column`;
+            buttonContainer.style.gap = `30px`; // Сохраняем расстояние между кнопками
+        }
+    
+
+    // Обновляем позицию и ширину #counter
+    const counter = panel.querySelector('#counter');
+    if (counter) {
+        counter.style.maxWidth = `${Math.min(445, 455 * (panelWidth / 750))}px`; // Увеличиваем на 35px
+        counter.style.right = `10px`; // Позиция в правом углу
+        counter.style.top = `10px`; // Позиция в верхнем углу
+    }
+
+    // Обновляем размеры dragHandle
+    const dragHandle = panel.querySelector('.drag-handle');
+    if (dragHandle) {
+        dragHandle.style.width = `${panelWidth - 6}px`; // Учитываем left: 3px
+        dragHandle.style.height = `${panelHeight}px`; // Полная высота панели
+    }
+}
+
+    handles.forEach(handle => {
+        handle.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            isResizing = true;
+            currentHandle = handle;
+            startX = e.clientX;
+            startY = e.clientY;
+            const rect = panel.getBoundingClientRect();
+            startWidth = rect.width;
+            startHeight = rect.height;
+            startLeft = rect.left;
+            document.body.style.userSelect = 'none'; // Отключаем выделение текста
+            console.log("[UI] Resizing started with handle:", handle.className);
+        });
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isResizing) return;
+
+        let newWidth = startWidth;
+        let newHeight = startHeight;
+        let newLeft = startLeft;
+
+        const minWidth = 200;
+        const minHeight = 200;
+        const maxWidth = window.innerWidth - 20;
+        const maxHeight = window.innerHeight - 20;
+
+        // Обработка изменения ширины
+        if (currentHandle.classList.contains('right')) {
+            newWidth = Math.max(minWidth, Math.min(maxWidth, startWidth + (e.clientX - startX)));
+        } else if (currentHandle.classList.contains('left')) {
+            newWidth = Math.max(minWidth, Math.min(maxWidth, startWidth - (e.clientX - startX)));
+            newLeft = startLeft + (e.clientX - startX);
+        }
+
+        // Обработка изменения высоты
+        if (currentHandle.classList.contains('bottom')) {
+            newHeight = Math.max(minHeight, Math.min(maxHeight, startHeight + (e.clientY - startY)));
+        } else if (currentHandle.classList.contains('top')) {
+            newHeight = Math.max(minHeight, Math.min(maxHeight, startHeight - (e.clientY - startY)));
+            // Не изменяем top панели
+        }
+
+        // Обработка угловых ручек
+        if (currentHandle.classList.contains('top-left')) {
+            newWidth = Math.max(minWidth, Math.min(maxWidth, startWidth - (e.clientX - startX)));
+            newHeight = Math.max(minHeight, Math.min(maxHeight, startHeight - (e.clientY - startY)));
+            newLeft = startLeft + (e.clientX - startX);
+        } else if (currentHandle.classList.contains('top-right')) {
+            newWidth = Math.max(minWidth, Math.min(maxWidth, startWidth + (e.clientX - startX)));
+            newHeight = Math.max(minHeight, Math.min(maxHeight, startHeight - (e.clientY - startY)));
+        } else if (currentHandle.classList.contains('bottom-left')) {
+            newWidth = Math.max(minWidth, Math.min(maxWidth, startWidth - (e.clientX - startX)));
+            newHeight = Math.max(minHeight, Math.min(maxHeight, startHeight + (e.clientY - startY)));
+            newLeft = startLeft + (e.clientX - startX);
+        } else if (currentHandle.classList.contains('bottom-right')) {
+            newWidth = Math.max(minWidth, Math.min(maxWidth, startWidth + (e.clientX - startX)));
+            newHeight = Math.max(minHeight, Math.min(maxHeight, startHeight + (e.clientY - startY)));
+        }
+
+        // Ограничиваем позицию, чтобы панель не выходила за экран
+        newLeft = Math.max(0, Math.min(newLeft, window.innerWidth - newWidth));
+
+        // Применяем новые размеры и позицию
+        panel.style.width = `${newWidth}px`;
+        panel.style.height = `${newHeight}px`;
+        panel.style.left = `${newLeft}px`;
+        // Не трогаем panel.style.top
+
+        // Обновляем размеры и позиции элементов
+        updateChildElements();
+
+        // Сохраняем размеры и позицию
+        setStorage('panelSize', { width: newWidth, height: newHeight });
+        setStorage('panelPosition', { left: newLeft });
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (isResizing) {
+            isResizing = false;
+            currentHandle = null;
+            document.body.style.userSelect = ''; // Восстанавливаем выделение текста
+            console.log("[UI] Resizing stopped");
+        }
+    });
+
+    // Вызываем при инициализации, чтобы синхронизировать размеры и позиции
+    updateChildElements();
+}
+
+// ============== end of  makePanelResizable ================ // 
+
+
+// =========== функция и контейнер для перетаскивания панели makePanelDraggable ============ //
+
+function makePanelDraggable(panel) {
+    console.log("[UI] Setting up draggable panel...");
+    let offsetX = 0, offsetY = 0, isDragging = false;
+
+    const dragHandle = document.createElement('div');
+    dragHandle.className = 'drag-handle';
+    dragHandle.style.cssText = `
+        width: ${panel.offsetWidth - 6}px;
+        height: ${panel.offsetHeight}px;
+        background: transparent;
+        cursor: grab;
+        position: absolute;
+        top: 0px;
+        left: 3px;
+        z-index: -1;
+        border-radius: 8px 8px 0px 0px;
+
+        
+ #control-panel {
+        position: fixed;
+        background: #1f1f23;
+        border-radius: 8px;
+        z-index: 10000;
+        min-width: 200px; /* Минимальная ширина */
+        min-height: 100px; /* Минимальная высота */
+        width: 750px; /* Начальная ширина */
+        height: 730px; /* Начальная высота */
+    }
+    `;
+    panel.appendChild(dragHandle);
+
+    dragHandle.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        offsetX = e.clientX - panel.getBoundingClientRect().left;
+        offsetY = e.clientY - panel.getBoundingClientRect().top;
+        dragHandle.style.cursor = 'grabbing';
+        console.log("[UI] Dragging started");
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const newLeft = e.clientX - offsetX;
+        const newTop = e.clientY - offsetY;
+        panel.style.left = `${newLeft}px`;
+        panel.style.top = `${newTop}px`;
+        setStorage('panelPosition', { left: newLeft, top: newTop });
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (isDragging) {
+            isDragging = false;
+            dragHandle.style.cursor = 'grab';
+            console.log("[UI] Dragging stopped");
+        }
+    });
+}
+
+// =========== end of  makePanelDraggable ============ //
+
+// ==================== scrollable button-container ================== //
+function injectCSS() {
+    const style = document.createElement('style');
+    style.textContent = `
+.button-container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            position: absolute;
+            bottom: calc(1px * (var(--panel-height, 735) / 735));
+            right: 6px; 
+            max-height: calc(var(--panel-height, 735px) - 300px);
+            overflow-y: auto; /* Включаем вертикальную прокрутку */
+            overflow-x: hidden; /* Скрываем горизонтальную прокрутку */
+            transition: opacity 0.3s;
+            background: linear-gradient(rgb(101, 58, 13), transparent, rgb(68, 33, 90));
+            padding: 8px 12px;
+            border-radius: 8px;
+            border: 1px solid rgb(71, 236, 200);
+            box-sizing: border-box;
+        }
+        .button-container::-webkit-scrollbar {
+            width: 10px; /* Ширина вертикального скроллбара */
+        }
+        .button-container::-webkit-scrollbar-thumb {
+            background: #ffffff1a; /* Цвет ползунка */
+            border: 1px solid rgba(255, 255, 255, 0.54); 
+            border-radius: 5px;
+        }
+        .button-container::-webkit-scrollbar-track {
+            background: rgba(33, 153, 107, 0); /* Цвет трека */
+        }
+        .button-container button {
+            width: 100%;
+            min-height: 40px;
+        }
+    `;
+    document.head.appendChild(style);
+    console.log("[UI] CSS for button-container injected");
+}
+
+// Вызвать функцию в createUI
+injectCSS();
+
+// ==================== end of  scrollable button-container ================== //
+
+// ======= отвечает за привязку обработчиков событий bindButtonHandlers  ================== //
+
+function bindButtonHandlers(elements, handlers) {
+    if (!elements) return;
+    console.log("[UI] Binding button handlers...");
+
+    elements.searchButton.onclick = handlers.search;
+    elements.addButton.onclick = handlers.add;
+    elements.clearAllButton.onclick = handlers.clearAll;
+    elements.exportButton.onclick = handlers.export;
+    elements.importButton.onclick = handlers.import;
+    elements.unblockAllButton.onclick = handlers.unblockAll;
+    elements.blockAllButton.onclick = handlers.blockAll;
+    elements.showStatsButton.onclick = handlers.showStats;
+    elements.closeChartButton.onclick = handlers.closeChart;
+    elements.platformSelect.onchange = handlers.platformChange;
+    elements.themeSelect.onchange = handlers.themeChange;
+    if (elements.toggleLoggingButton) {
+        elements.toggleLoggingButton.onclick = handlers.toggleLogging;
+        console.log("[UI] toggleLoggingButton handler bound");
+    } else {
+        console.error("[UI] toggleLoggingButton is undefined in bindButtonHandlers");
+    }
+
+    // Дебансинг для ввода в поле поиска
+    let searchTimeout;
+    elements.searchInput.oninput = () => {
+        if (searchTimeout) clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+            const searchTerm = elements.searchInput.value.trim();
+            if (!searchTerm) {
+                filterBlockedList('');
+                if (elements.resetSearchButton) {
+                    elements.resetSearchButton.disabled = true;
+                }
+            } else {
+                filterBlockedList(searchTerm);
+                if (elements.resetSearchButton) {
+                    elements.resetSearchButton.disabled = false;
+                }
+            }
+        }, 300); // Задержка 300 мс для ввода
+    };
+
+    // Обработчик кнопки сброса
+    elements.resetSearchButton = document.getElementById('reset-search-button');
+    if (elements.resetSearchButton) {
+        elements.resetSearchButton.onclick = () => {
+            elements.searchInput.value = '';
+            filterBlockedList('');
+            elements.resetSearchButton.disabled = true;
+        };
+        elements.resetSearchButton.disabled = !elements.searchInput.value.trim();
+    }
+}
+
+// ==================== end of bindButtonHandlers ====================== //
+
+// ============ content.js ================ //
+
+function initContextMenu() {
+    console.log("[Content] Initializing context menu...");
+    chrome.runtime.sendMessage({
+        action: 'createContextMenu',
+        items: [
+            {
+                id: 'blockEmote',
+                title: 'Block Emote',
+                contexts: ['image'],
+                documentUrlPatterns: [
+                    'https://www.twitch.tv/*',
+                    'https://player.twitch.tv/*',
+                    'https://www.twitch.tv/embed/*',
+                    'https://*.ttvnw.net/*',
+                    'https://*.jtvnw.net/*',
+                    'https://cdn.frankerfacez.com/*',
+                    'https://cdn.7tv.app/*',
+                    'https://cdn.betterttv.net/*',
+                    'https://www.kick.com/*',
+                    'https://kick.com/*',
+                    'https://files.kick.com/*'
+                ]
+            },
+            {
+                id: 'showEmotesPopup',
+                title: 'Show Emotes Popup',
+                contexts: ['image'],
+                documentUrlPatterns: [
+                    'https://www.twitch.tv/*',
+                    'https://player.twitch.tv/*',
+                    'https://www.twitch.tv/embed/*',
+                    'https://*.ttvnw.net/*',
+                    'https://*.jtvnw.net/*',
+                    'https://cdn.frankerfacez.com/*',
+                    'https://cdn.7tv.app/*',
+                    'https://cdn.betterttv.net/*',
+                    'https://www.kick.com/*',
+                    'https://kick.com/*',
+                    'https://files.kick.com/*'
+                ]
+            }
+        ]
+    });
+}
+// ===== вызов функции инициализации контекстного меню ======== //
+
+// =============== Инициализация контекстного меню ==================== // 
+
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    console.log("[Content] Received message:", request);
+    if (request.action === 'contextMenuClicked') {
+        const { menuItemId, srcUrl, linkText, frameId } = request.info;
+        console.log("[Content] Menu item clicked:", menuItemId, "srcUrl:", srcUrl);
+
+        if (menuItemId === 'blockEmote' && srcUrl) {
+            let platform, emoteName, emoteUrl, emotePrefix;
+            let emoteAlt = linkText?.trim() || '';
+            let targetElement = null;
+
+            try {
+                const frame = frameId && document.querySelectorAll('iframe')[frameId]
+                    ? document.querySelectorAll('iframe')[frameId]
+                    : document;
+                const images = frame.querySelectorAll(`img[src="${srcUrl}"], img[srcset*="${srcUrl}"]`);
+                for (const img of images) {
+                    if (img.src === srcUrl || img.getAttribute('srcset')?.includes(srcUrl)) {
+                        targetElement = img;
+                        break;
+                    }
+                }
+                if (!targetElement && images.length > 0) {
+                    targetElement = images[0];
+                }
+                console.log('[Content] Found target element:', targetElement);
+            } catch (e) {
+                console.warn('[Content] Failed to find element in DOM:', e);
+            }
+
+            if (targetElement) {
+                emoteAlt = targetElement.getAttribute('alt') ||
+                           targetElement.getAttribute('data-emote-name') ||
+                           targetElement.getAttribute('title') ||
+                           targetElement.getAttribute('data-code') || // Для эмодзи
+                           '';
+                emoteAlt = emoteAlt.trim();
+            }
+
+            const dataProvider = targetElement?.getAttribute('data-provider') || '';
+            const dataSet = targetElement?.getAttribute('data-set') || '';
+            if (srcUrl.includes('7tv.app') || dataProvider === '7tv' || dataSet.includes('seventv_emotes')) {
+                platform = '7tv';
+                emoteUrl = srcUrl;
+                emoteName = emoteAlt || srcUrl.split('/').slice(-2)[0] || 'Unnamed';
+                emotePrefix = emoteUrl;
+            } else if (srcUrl.includes('betterttv.net') || dataProvider === 'bttv' || (dataProvider === 'ffz' && srcUrl.includes('betterttv.net'))) {
+                platform = 'bttTV';
+                emoteUrl = srcUrl;
+                emoteName = emoteAlt || srcUrl.split('/').pop().replace(/\.webp|\.png/, '') || 'Unnamed';
+                emotePrefix = emoteUrl;
+            } else if (srcUrl.includes('frankerfacez.com') || (dataProvider === 'ffz' && !srcUrl.includes('betterttv.net'))) {
+                platform = 'ffz';
+                emoteUrl = srcUrl;
+                emoteName = emoteAlt || srcUrl.split('/').pop().replace(/\.webp|\.png/, '') || 'Unnamed';
+                emotePrefix = emoteUrl;
+            } else if (srcUrl.includes('jtvnw.net') || emoteAlt || dataProvider === 'twitch') {
+                platform = 'TwitchChannel';
+                emoteName = emoteAlt || srcUrl.split('/').pop() || 'Unnamed';
+                const match = emoteName.match(/^([a-z0-9]+)([A-Z].*|\d+.*)$/i);
+                emotePrefix = match ? match[1] : emoteName.split(/[^a-zA-Z0-9]/)[0] || emoteName;
+                emoteUrl = '';
+            } else if (dataProvider === 'emoji') {
+                platform = 'emoji';
+                emoteName = emoteAlt || srcUrl.split('/').pop() || 'Unnamed';
+                emotePrefix = emoteName;
+                emoteUrl = srcUrl;
+            } else {
+                platform = 'TwitchChannel';
+                emoteName = emoteAlt || srcUrl.split('/').pop() || 'Unnamed';
+                const match = emoteName.match(/^([a-z0-9]+)([A-Z].*|\d+.*)$/i);
+                emotePrefix = match ? match[1] : emoteName.split(/[^a-zA-Z0-9]/)[0] || emoteName;
+                emoteUrl = '';
+            }
+
+            if (!emoteName || emoteName === 'Unknown') {
+                emoteName = targetElement?.getAttribute('data-id') || srcUrl.split('/').pop() || 'Unnamed';
+            }
+
+            console.log(`[Content] Blocking emote:`, { emoteName, platform, emoteUrl, emotePrefix });
+            const item = addEmoteOrChannel(emotePrefix, platform, emoteName, emoteUrl, targetElement);
+            if (item && targetElement) {
+                targetElement.setAttribute('data-emote-id', item.id);
+                targetElement.style.display = 'none';
+                console.log(`[Content] Immediately hid emote ${emoteName} with ID ${item.id}`);
+            }
+        } else if (menuItemId === 'showEmotesPopup' && srcUrl) {
+            let emotes = [];
+            let targetElement = null;
+
+            try {
+                const frame = document;
+                console.log("[Content] Frame selected for search:", frame);
+
+                // Получаем id эмодзи из src
+                let emoteId = '';
+                try {
+                    // Попробуем получить id из ссылки 7tv/ffz/bttv
+                    emoteId = (srcUrl.match(/(?:emote|Emote|emo)\/([0-9A-Za-z]+)/) || [])[1] ||
+                              (srcUrl.split('/')[4] || '');
+                } catch { emoteId = srcUrl; }
+
+                // Находим элемент эмодзи
+                const emoteElement = frame.querySelector(
+                    `img[src*="${emoteId}"], img[srcset*="${emoteId}"]`
+                );
+                console.log("[Content] Searched for emoteElement with emoteId:", emoteId, "Result:", emoteElement);
+
+                // Находим контейнер (сообщение чата или .ffz--inline)
+                const container = emoteElement?.closest(
+                    '.chat-line__message-container, .ffz--inline, .chat-line__message, .modified-emote'
+                ) || emoteElement?.parentElement || emoteElement;
+                console.log("[Content] Container found:", container);
+
+                if (!emoteElement && !container) {
+                    // fallback на одиночный смайл
+                    console.warn("[Content] No emote element or container found for srcUrl:", srcUrl);
+                    emotes = [{
+                        src: srcUrl,
+                        alt: 'Unnamed',
+                        platform: srcUrl.includes('7tv.app') ? '7tv' :
+                                  srcUrl.includes('betterttv.net') ? 'bttTV' :
+                                  srcUrl.includes('frankerfacez.com') ? 'ffz' :
+                                  srcUrl.includes('twemoji') ? 'emoji' : 'TwitchChannel',
+                        element: null,
+                        id: emoteId || ''
+                    }];
+                    console.log("[Content] Fallback: Created single emote entry:", emotes);
+                } else {
+                    // Новый алгоритм: собираем все img внутри контейнера, фильтруем и убираем дубли
+                    const allImgs = Array.from(container.querySelectorAll('img'));
+                    const filteredImgs = allImgs.filter(img => {
+                        const style = window.getComputedStyle(img);
+                        const isVisible = style.display !== 'none' && style.opacity !== '0' && img.width > 0 && img.height > 0;
+                        const isEmote =
+                            img.classList.contains('chat-image') ||
+                            img.classList.contains('chat-line__message--emote') ||
+                            img.classList.contains('ffz-emote') ||
+                            img.classList.contains('seventv-emote') ||
+                            img.classList.contains('bttv-emote') ||
+                            img.classList.contains('twitch-emote') ||
+                            img.getAttribute('data-provider');
+                        return img.src && isVisible && isEmote;
+                    });
+                    // Убираем дубли по data-id или src
+                    const seen = new Set();
+                    const uniqueImgs = filteredImgs.filter(img => {
+                        const key = img.getAttribute('data-id') || img.src;
+                        if (seen.has(key)) return false;
+                        seen.add(key);
+                        return true;
+                    });
+                    // Преобразуем в массив emotes
+                    emotes = uniqueImgs.map(img => {
+                        const emoteUrl = img.src || img.getAttribute('srcset')?.split(' ')[0] || '';
+                        const emoteAlt = img.getAttribute('alt') ||
+                                         img.getAttribute('data-emote-name') ||
+                                         img.getAttribute('title') ||
+                                         img.getAttribute('data-code') || '';
+                        const dataProvider = img.getAttribute('data-provider') || '';
+                        const dataSet = img.getAttribute('data-set') || '';
+                        let platform = 'TwitchChannel';
+                        if (emoteUrl.includes('7tv.app') || dataProvider === '7tv' || dataSet.includes('seventv_emotes')) {
+                            platform = '7tv';
+                        } else if (emoteUrl.includes('betterttv.net') || dataProvider === 'bttv') {
+                            platform = 'bttTV';
+                        } else if (emoteUrl.includes('frankerfacez.com') || dataProvider === 'ffz') {
+                            platform = 'ffz';
+                        } else if (dataProvider === 'emoji') {
+                            platform = 'emoji';
+                        }
+                        return {
+                            src: emoteUrl,
+                            alt: emoteAlt.trim() || 'Unnamed',
+                            platform,
+                            element: img,
+                            id: img.getAttribute('data-emote-id') || img.getAttribute('data-id') || ''
+                        };
+                    }).filter(emote => emote.src || emote.alt);
+                    targetElement = container;
+                    console.log('[Content] Found emotes in container:', emotes);
+                }
+            } catch (e) {
+                console.error('[Content] Error finding elements in DOM:', e);
+                const emoteId = srcUrl.split('/')[4] || '';
+                emotes = [{
+                    src: srcUrl,
+                    alt: 'Unnamed',
+                    platform: srcUrl.includes('7tv.app') ? '7tv' :
+                              srcUrl.includes('betterttv.net') ? 'bttTV' :
+                              srcUrl.includes('frankerfacez.com') ? 'ffz' :
+                              srcUrl.includes('twemoji') ? 'emoji' : 'TwitchChannel',
+                    element: null,
+                    id: emoteId
+                }];
+                console.log("[Content] Fallback due to error:", emotes);
+            }
+
+            console.log("[Content] Showing emote selection popup for emotes:", emotes);
+            showEmoteSelectionPopup(emotes, (selectedEmote) => {
+                let emoteName = selectedEmote.alt;
+                let emoteUrl = selectedEmote.src;
+                let emotePrefix = emoteName;
+
+                if (selectedEmote.platform === 'TwitchChannel' || selectedEmote.platform === 'emoji') {
+                    const match = emoteName.match(/^([a-z0-9]+)([A-Z].*|\d+.*)$/i);
+                    emotePrefix = match ? match[1] : emoteName.split(/[^a-zA-Z0-9]/)[0] || emoteName;
+                    emoteUrl = selectedEmote.platform === 'emoji' ? emoteUrl : '';
+                } else {
+                    emotePrefix = emoteUrl;
+                }
+
+                console.log(`[Content] Blocking selected emote from popup:`, { emoteName, platform: selectedEmote.platform, emoteUrl, emotePrefix });
+                const item = addEmoteOrChannel(emotePrefix, selectedEmote.platform, emoteName, emoteUrl, selectedEmote.element);
+                if (item && selectedEmote.element) {
+                    selectedEmote.element.setAttribute('data-emote-id', item.id);
+                    selectedEmote.element.style.display = 'none';
+                    console.log(`[Content] Immediately hid emote ${emoteName} with ID ${item.id}`);
+                    setStorage(() => {
+                        console.log("[Content] Storage updated after blocking from popup");
+                        toggleEmotesInNode(document.body, true);
+                    });
+                } else {
+                    console.error("[Content] Failed to block emote from popup:", selectedEmote);
+                }
+            });
+        } else {
+            console.warn("[Content] Unhandled menuItemId or missing srcUrl:", menuItemId, srcUrl);
+        }
+    }
+});
+
+// ==================== end of Инициализация контекстного меню ================== //
+
+
+// =================== Функция обновления Списка залокированный элементов в чате ============================ //
+
+const highlightCache = new Map();
+
+function highlightText(text, term) {
+    if (!term) return text;
+    const cacheKey = `${text}:${term}`;
+    if (highlightCache.has(cacheKey)) return highlightCache.get(cacheKey);
+
+    const lowerText = text.toLowerCase();
+    const lowerTerm = term.toLowerCase();
+    const index = lowerText.indexOf(lowerTerm);
+    if (index === -1) {
+        highlightCache.set(cacheKey, text);
+        return text;
+    }
+    const before = text.slice(0, index);
+    const match = text.slice(index, index + term.length);
+    const after = text.slice(index + term.length);
+    const result = `${before}<span class="highlight">${match}</span>${after}`;
+    highlightCache.set(cacheKey, result);
+    return result;
+}
+
+function updateBlockedList(blockedList, { blockedEmotes, blockedChannels, newlyAddedIds }, searchTerm = '') {
+    console.log('[Content] Updating blocked list (virtualized)...', {
+        blockedEmotesCount: blockedEmotes.length,
+        blockedChannelsCount: blockedChannels.length,
+        searchTerm
+    });
+
+    if (!blockedList) {
+        console.warn('[Content] Blocked list element not found');
+        return;
+    }
+
+    const allItems = [
+        ...blockedChannels.filter(item => item && item.id),
+        ...blockedEmotes.filter(item => item && item.id)
+    ];
+    console.log('[Debug] allItems sample', allItems.slice(0, 5));
+
+    if (allItems.length === 0) {
+        console.warn('[Debug] No items in allItems');
+        blockedList.innerHTML = '<div>No blocked items</div>';
+        return;
+    }
+
+    let container = blockedList.querySelector('.blocked-list-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.className = 'blocked-list-container';
+        blockedList.appendChild(container);
+        console.log('[Debug] Created blocked-list-container');
+    }
+
+    // Динамическая высота элемента
+    const getItemHeight = () => {
+        const sampleLi = document.createElement('li');
+        sampleLi.className = 'blocked-item';
+        sampleLi.style.visibility = 'hidden';
+        sampleLi.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span>Test</span>
+                <div class="date-delete-group">
+                    <span class="data-time">Test</span>
+                    <button class="delete-button">Delete</button>
+                </div>
+            </div>
+            <span>Test</span>
+        `;
+        container.appendChild(sampleLi);
+        const height = sampleLi.offsetHeight || 60;
+        sampleLi.remove();
+        return height;
+    };
+    const itemHeight = getItemHeight();
+    console.log('[Debug] Item height', itemHeight);
+
+    const totalHeight = allItems.length * itemHeight;
+    container.style.height = `${totalHeight}px`;
+
+    const lastItem = allItems.length > 0 ? allItems.reduce((latest, current) => {
+        return new Date(current.date) > new Date(latest.date) ? current : latest;
+    }, allItems[0]) : null;
+    console.log('[Debug] Last item', lastItem ? { id: lastItem.id, emoteName: lastItem.emoteName, date: lastItem.date } : null);
+
+    function renderVisibleItems() {
+        const scrollTop = blockedList.scrollTop;
+        const viewportHeight = blockedList.clientHeight;
+        const buffer = 5;
+        const startIndex = Math.max(0, Math.floor(scrollTop / itemHeight) - buffer);
+        const endIndex = Math.min(allItems.length - 1, Math.ceil((scrollTop + viewportHeight) / itemHeight) + buffer);
+
+        console.log('[Debug] Render indices', { scrollTop, viewportHeight, startIndex, endIndex });
+
+        // Очищаем контейнер перед рендерингом
+        container.innerHTML = '';
+        console.log('[Debug] Cleared container');
+
+        if (startIndex > endIndex) {
+            console.warn('[Debug] Invalid indices, no items rendered', { startIndex, endIndex });
+            return;
+        }
+
+        for (let i = startIndex; i <= endIndex; i++) {
+            const item = allItems[i];
+            if (!item || !item.id) {
+                console.warn('[Debug] Invalid item at index', i, item);
+                continue;
+            }
+
+            const li = document.createElement('li');
+            li.className = `blocked-item ${newlyAddedIds.has(item.id) ? 'new-item' : ''} ${item.id === lastItem?.id ? 'last-item-highlight' : ''}`;
+            li.dataset.id = item.id;
+            li.style.position = 'absolute';
+            li.style.top = `${i * itemHeight}px`;
+            li.style.width = '100%';
+            li.style.height = `${itemHeight}px`;
+
+            let titleText = '';
+            let infoText = '';
+            if (item.platform === 'TwitchChannel') {
+                titleText = `TwitchChannel > channelName: ${item.channelName || item.name || item.emoteName || 'Unknown'}`;
+                infoText = `(emoteName: ${item.emoteName || 'Unknown'})`;
+            } else {
+                titleText = `${item.platform} > ${item.emoteName || 'Unknown'}`;
+                infoText = `<a href="${item.emoteUrl || '#'}" target="_blank" style="color:rgb(34, 184, 59); text-decoration: underline;">(url: ${item.emoteUrl || 'Unknown'})</a>`;
+            }
+
+            titleText = highlightText(titleText, searchTerm);
+            infoText = highlightText(infoText, searchTerm);
+
+            li.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>${titleText}</span>
+                    <div class="date-delete-group">
+                        <span class="data-time">${item.date ? new Date(item.date).toLocaleString('en-GB') : 'N/A'}</span>
+                        <button class="delete-button">Delete</button>
+                    </div>
+                </div>
+                <span>${infoText}</span>
+            `;
+
+            li.querySelector('.delete-button').onclick = () => {
+                removeEmoteOrChannel(item.id);
+            };
+
+            container.appendChild(li);
+            console.log('[Debug] Rendered item', { index: i, id: item.id, top: li.style.top, isLast: item.id === lastItem?.id });
+
+            if (item.id === lastItem?.id) {
+                setTimeout(() => {
+                    li.classList.remove('last-item-highlight');
+                    console.log(`[Content] Подсветка убрана с элемента: ${item.emoteName || item.id}`);
+                }, 5000);
+            }
+        }
+
+        console.log('[Debug] Total items in DOM', container.querySelectorAll('li').length);
+    }
+
+    renderVisibleItems();
+
+    // Дебансинг
+    blockedList.removeEventListener('scroll', renderVisibleItems);
+    window.removeEventListener('resize', renderVisibleItems);
+
+    let scrollTimeout;
+    const debouncedRender = () => {
+        if (scrollTimeout) clearTimeout(scrollTimeout);
+        scrollTimeout = setTimeout(() => {
+            console.log('[Debug] Debounced render triggered');
+            renderVisibleItems();
+        }, 100);
+    };
+
+    blockedList.addEventListener('scroll', debouncedRender);
+    window.addEventListener('resize', debouncedRender);
+}
+
+// ================= end of Функция обновления Списка заблокированный элементов в чате ======================= //
+
+// ================= Функция сортировки заблокированных эмодзи ==================== //
+function sortblockedEmotes(criteria, order) {
+    console.log("[Content] Sorting by:", criteria, order);
+    const sortFunc = (a, b) => {
+        let comparison = 0;
+        if (criteria === 'name') {
+            const nameA = a.platform === 'TwitchChannel' ? a.channelName || a.emoteName : a.emoteName;
+            const nameB = b.platform === 'TwitchChannel' ? b.channelName || b.emoteName : b.emoteName;
+            comparison = nameA.localeCompare(nameB);
+        } else if (criteria === 'platform') {
+            comparison = a.platform.localeCompare(b.platform);
+        } else if (criteria === 'date') {
+            comparison = new Date(a.date) - new Date(b.date);
+        }
+        return order === 'asc' ? comparison : -comparison;
+    };
+
+    blockedEmotes.sort(sortFunc);
+    blockedChannels.sort(sortFunc);
+    if (uiElements && uiElements.blockedList) {
+        updateBlockedList(uiElements.blockedList, getBlockedItems());
+    }
+}
+
+// ================= end of Функция сортировки заблокированных эмодзи ==================== //
+
+
+// ================= Функция прокрутки к последнему добавленному элементу ==================== //
+
+function goToLastAddedItem() {
+    console.log("[Content] Going to last added item...");
+    const blockedList = uiElements ? uiElements.blockedList : document.getElementById('blocked-list');
+    if (!blockedList) {
+        console.warn("[Content] Blocked list element not found");
+        return;
+    }
+
+    const allItems = [...blockedChannels, ...blockedEmotes];
+    if (allItems.length === 0) {
+        console.log("[Content] Список пуст, некуда прокручивать");
+        return;
+    }
+
+    // Находим элемент с самой поздней датой
+    const lastItem = allItems.reduce((latest, current) => {
+        return new Date(current.date) > new Date(latest.date) ? current : latest;
+    }, allItems[0]);
+    console.log('[Debug] Last item', { id: lastItem.id, emoteName: lastItem.emoteName, date: lastItem.date });
+
+    // Вычисляем индекс последнего элемента
+    const lastItemIndex = allItems.findIndex(item => item.id === lastItem.id);
+    if (lastItemIndex === -1) {
+        console.warn("[Content] Последний элемент не найден в списке");
+        return;
+    }
+
+    // Получаем динамическую высоту элемента
+    const getItemHeight = () => {
+        const container = blockedList.querySelector('.blocked-list-container') || blockedList;
+        const sampleLi = document.createElement('li');
+        sampleLi.className = 'blocked-item';
+        sampleLi.style.visibility = 'hidden';
+        sampleLi.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span>Test</span>
+                <div class="date-delete-group">
+                    <span class="data-time">Test</span>
+                    <button class="delete-button">Delete</button>
+                </div>
+            </div>
+            <span>Test</span>
+        `;
+        container.appendChild(sampleLi);
+        const height = sampleLi.offsetHeight || 60;
+        sampleLi.remove();
+        return height;
+    };
+    const itemHeight = getItemHeight();
+    console.log('[Debug] Item height in goToLastAddedItem', itemHeight);
+
+    const lastItemPosition = lastItemIndex * itemHeight;
+    const viewportHeight = blockedList.clientHeight;
+    const container = blockedList.querySelector('.blocked-list-container') || blockedList;
+    const containerHeight = parseFloat(container.style.height) || allItems.length * itemHeight;
+
+    // Прокручиваем к последнему элементу с учетом буфера
+    const bufferItems = 5; // Буфер из updateBlockedList
+    const scrollPosition = Math.max(0, lastItemPosition - (bufferItems * itemHeight));
+    blockedList.scrollTop = scrollPosition;
+    console.log('[Debug] Scroll position', {
+        lastItemIndex,
+        lastItemPosition,
+        scrollPosition,
+        viewportHeight,
+        containerHeight,
+        maxScroll: containerHeight - viewportHeight
+    });
+
+    // Ждем рендеринга и применяем подсветку
+    setTimeout(() => {
+        const lastElement = blockedList.querySelector(`[data-id="${lastItem.id}"]`);
+        console.log('[Debug] Last element search', { id: lastItem.id, found: !!lastElement });
+        if (lastElement) {
+            lastElement.classList.add('last-item-highlight');
+            console.log(`[Content] Подсвечено: ${lastItem.emoteName} (ID: ${lastItem.id})`);
+            setTimeout(() => {
+                lastElement.classList.remove('last-item-highlight');
+                console.log(`[Content] Подсветка убрана с элемента: ${lastItem.emoteName}`);
+            }, 600000);
+        } else {
+            console.warn("[Content] Элемент не отрендерился после прокрутки", { id: lastItem.id });
+        }
+    }, 300);
+
+    console.log(`[Content] Прокручено к элементу: ${lastItem.emoteName} (Index: ${lastItemIndex}, Date: ${lastItem.date})`);
+}
+
+// ================= end of Функция прокрутки к последнему добавленному элементу ==================== //
+
+
+// ================= Функция обновления счетчика ==================== //
+function updateCounter(counter) {
+    console.log("[Content] Updating counter...");
+    if (!counter) {
+        console.warn("[Content] Counter element not found");
+        return;
+    }
+    const twitchCount = blockedChannels.length;
+    const bttvCount = blockedEmotes.filter(channel => channel.platform === 'bttTV').length;
+    const tv7Count = blockedEmotes.filter(channel => channel.platform === '7tv').length;
+    const ffzCount = blockedEmotes.filter(channel => channel.platform === 'ffz').length;
+    const totalCount = twitchCount + bttvCount + tv7Count + ffzCount;
+    counter.innerText = `Twitch: ${twitchCount} | BTTV: ${bttvCount} | 7TV: ${tv7Count} | FFZ: ${ffzCount} | Total: ${totalCount}`;
+}
+
+// ================= end of Функция обновления счетчика ==================== //
+
+
+// =============== Функция фильтрации и поиска списка заблокированных элементов ================= //
+
+function filterBlockedList(searchTerm) {
+    console.log("[Content] Filtering list with term:", searchTerm);
+    const lowerSearchTerm = searchTerm.toLowerCase().trim();
+    const allItems = [...blockedChannels, ...blockedEmotes];
+    const filteredItems = lowerSearchTerm
+        ? allItems.filter(item => {
+              const text = [
+                  item.emoteName,
+                  item.platform,
+                  item.channelName || '',
+                  item.prefix || '',
+                  item.emoteUrl || ''
+              ].join(' ').toLowerCase();
+              return text.includes(lowerSearchTerm);
+          })
+        : allItems;
+
+    updateBlockedList(uiElements.blockedList, {
+        blockedEmotes: filteredItems.filter(item => item.platform !== 'TwitchChannel'),
+        blockedChannels: filteredItems.filter(item => item.platform === 'TwitchChannel'),
+        newlyAddedIds
+    }, lowerSearchTerm); // Передаём searchTerm
+
+    if (uiElements.resetSearchButton) {
+        uiElements.resetSearchButton.disabled = !lowerSearchTerm;
+    }
+}
+
+// ================= end of Функция для фильтрации списка заблокированных элементов ================= //
+
+// ================ Функция для отображения графика статистики chart.js  =============== //
+
+function showStatsChart(canvas) {
+    if (!canvas) {
+        console.warn("[Content] Stats chart canvas not found");
+        return;
+    }
+
+    const currentTheme = uiElements?.themeSelect?.value || 'default';
+    const isLightTheme = currentTheme === 'lightMode';
+
+    // Цвета для платформ
+    const platformColors = {
+        TwitchChannel: {
+            background: isLightTheme ? 'rgba(145, 70, 255, 0.8)' : 'rgba(145, 70, 255, 0.6)',
+            border: 'rgb(227, 218, 240)'
+        },
+        '7tv': {
+           background: isLightTheme ? ' #1b756e' : ' #1b756e',
+            border: ' #68cfa8'
+        },
+        bttTV: {
+             background: isLightTheme ? 'rgba(255, 87, 51, 0.8)' : 'rgba(255, 87, 51, 0.6)',
+            border: 'rgb(233, 156, 69)'
+        },
+        ffz: {
+             background: isLightTheme ? 'rgba(77, 68, 80, 0.84)' : 'rgba(0, 0, 0, 0.6)',
+            border: 'rgb(96, 221, 221)'
+        }
+    };
+
+    // Данные для графика
+    const platforms = ['TwitchChannel', '7tv', 'bttTV', 'ffz'];
+    const emoteCounts = platforms.map(platform => 
+        blockedEmotes.filter(e => e.platform === platform).length + 
+        blockedChannels.filter(c => c.platform === platform).length
+    );
+
+    // Формируем цвета для графика
+    const backgroundColors = platforms.map(platform => platformColors[platform].background);
+    const borderColors = platforms.map(platform => platformColors[platform].border);
+
+    // Цвета текста и сетки в зависимости от темы
+    const textColor = isLightTheme ? ' #333333' : ' #FFFFFF';
+    const gridColor = isLightTheme ? 'rgba(0, 0, 0, 0.1)' : 'rgba(255, 255, 255, 0.1)';
+    const borderGridColor = isLightTheme ? ' #CCCCCC' : ' #444444';
+
+    // Уничтожаем существующий график
+    if (canvas.chart) {
+        canvas.chart.destroy();
+    }
+
+    // Создаём новый график
+    canvas.chart = new Chart(canvas, {
+        type: 'bar', // Можно заменить на 'line', 'pie', и т.д.
+        data: {
+            labels: platforms,
+            datasets: [{
+                label: 'Blocked Items by Platform',
+                data: emoteCounts,
+                backgroundColor: backgroundColors,
+                borderColor: borderColors,
+                borderWidth: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    labels: {
+                        color: textColor,
+                        font: {
+                            size: 14
+                        }
+                    }
+                },
+                title: {
+                    display: true,
+                    text: 'Blocked Emotes and Channels by Platform',
+                    color: textColor,
+                    font: {
+                        size: 16,
+                        weight: 'bold'
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    ticks: {
+                        color: textColor,
+                        font: {
+                            size: 12
+                        }
+                    },
+                    grid: {
+                        color: gridColor,
+                        borderColor: borderGridColor
+                    }
+                },
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        color: textColor,
+                        font: {
+                            size: 12
+                        },
+                        stepSize: 1
+                    },
+                    grid: {
+                        color: gridColor,
+                        borderColor: borderGridColor
+                    }
+                }
+            }
+        }
+    });
+
+    console.log("[Content] Stats chart rendered with data:", emoteCounts);
+}
+
+// ================== end of showStatsChart charts js ========================== //
+
+
+// Функция для анимации открытия модального окна
+function animateModalOpen(modal, callback) {
+    modal.style.display = 'flex'; // Показываем окно
+    modal.style.opacity = '0'; // Начальная прозрачность
+    modal.style.transform = 'translateY(-100%)'; // Начальное положение выше экрана
+
+    const duration = 300; // Длительность анимации в миллисекундах
+    const startTime = performance.now();
+
+    function animate(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1); // Прогресс от 0 до 1
+
+        // Используем функцию ease-in-out для плавности
+        const ease = progress < 0.5
+            ? 2 * progress * progress
+            : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+
+        modal.style.opacity = ease; // Прозрачность от 0 до 1
+        modal.style.transform = `translateY(${(1 - ease) * -100}%)`; // Движение сверху вниз
+
+        if (progress < 1) {
+            requestAnimationFrame(animate);
+        } else {
+            modal.style.opacity = '1';
+            modal.style.transform = 'translateY(0)';
+            modal.classList.add('visible');
+            if (callback) callback(); // Вызываем callback (например, для рендера графика)
+        }
+    }
+
+    requestAnimationFrame(animate);
+}
+
+// ================== анимация chart js модального окна animateModalOpen ==================== //
+// Функция для анимации закрытия модального окна
+function animateModalClose(modal, callback) {
+    modal.style.opacity = '1'; // Начальная прозрачность
+    modal.style.transform = 'translateY(0)'; // Начальное положение
+
+    const duration = 300; // Длительность анимации в миллисекундах
+    const startTime = performance.now();
+
+    function animate(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1); // Прогресс от 0 до 1
+
+        // Используем функцию ease-in-out для плавности
+        const ease = progress < 0.5
+            ? 2 * progress * progress
+            : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+
+        modal.style.opacity = 1 - ease; // Прозрачность от 1 до 0
+        modal.style.transform = `translateY(${ease * -100}%)`; // Движение вверх
+
+        if (progress < 1) {
+            requestAnimationFrame(animate);
+        } else {
+            modal.style.display = 'none'; // Скрываем после анимации
+            modal.classList.remove('visible');
+            if (callback) callback();
+        }
+    }
+
+    requestAnimationFrame(animate);
+}
+
+// ============ end of анимация chart js модального окна animateModalClose ================= //
+
+// ================== Функция очистки всех заблокированных элементов ==================== //
+
+function clearAllBlockedItems(counter) {
+    debugger; // Остановит выполнение
+    console.log("[Content] Clearing all blocked items...");
+
+    // 1. Очищаем данные
+    blockedEmotes = [];
+    blockedChannels = [];
+    blockedEmoteIDs.clear();
+    blockedChannelIDs.clear();
+    newlyAddedIds.clear();
+    setStorage('blockedEmotes', blockedEmotes);
+    setStorage('blockedChannels', blockedChannels);
+     
+    processedEmotes = new WeakMap();
+
+    // 2. Проверяем, что данные пусты
+    if (blockedEmotes.length === 0 && blockedChannels.length === 0) {
+        console.log("[Content] Data cleared successfully");
+    } else {
+        console.error("[Content] Failed to clear data", { blockedEmotes, blockedChannels });
+        return;
+    }
+
+    // 3. Обновляем UI
+    const blockedList = uiElements?.blockedList || document.getElementById('blocked-list');
+    if (blockedList) {
+        console.log("[Content] Clearing blocked list in UI...");
+        blockedList.innerHTML = ''; // Очищаем список
+        requestAnimationFrame(() => {
+            blockedList.offsetHeight; // Форсируем reflow
+            console.log("[Content] Blocked list cleared in DOM");
+        });
+    } else {
+        console.error("[Content] Blocked list element not found in DOM");
+    }
+
+    // 4. Обновляем счетчик
+    updateCounter(counter);
+    console.log("[Content] All blocked items cleared and UI updated");
+}
+
+// ================== end of Функция очистки списка заблокированных элементов ==================== //
+
+// ================== Функция экспорта заблокированных элементов ==================== //
+
+function exportBlockedItems() {
+    console.log("[Content] Exporting blocked items... NEW VERSION 20250515");
+    try {
+        // Загружаем данные из хранилища
+        const blockedEmotes = getStorage('blockedEmotes', []);
+        const blockedChannels = getStorage('blockedChannels', []);
+        console.log("[Debug] blockedEmotes:", blockedEmotes);
+        console.log("[Debug] blockedChannels:", blockedChannels);
+
+        // Проверяем, что данные являются массивами
+        const emotesArray = Array.isArray(blockedEmotes) ? blockedEmotes : [];
+        const channelsArray = Array.isArray(blockedChannels) ? blockedChannels : [];
+        console.log("[Debug] emotesArray after check:", emotesArray);
+        console.log("[Debug] channelsArray after check:", channelsArray);
+
+        // Подсчитываем общее количество
+        const total = emotesArray.length + channelsArray.length;
+        console.log("[Debug] Total blocked items:", total);
+
+        // Формируем данные для экспорта
+        const data = {
+            blockedEmotes: emotesArray,
+            blockedChannels: channelsArray,
+            total: total
+        };
+        console.log("[Debug] Data object before export:", data);
+
+        // Создаем Blob с JSON-данными
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        
+       // Создаем имя файла с датой и общим количеством
+       const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+       const fileName = `7BTTVFZ_blocked_emotes_${date}_total${total}.json`;
+       console.log("[Debug] Generated fileName:", fileName);
+
+        // Создаем ссылку для скачивания
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        console.log("[Debug] Setting download attribute to:", fileName);
+
+        // Выполняем клик
+        a.click();
+
+        // Очищаем URL
+        URL.revokeObjectURL(url);
+        console.log("[Content] Export successful");
+    } catch (error) {
+        console.error("[Content] Export error:", error);
+    }
+}
+
+// ================== end of Функция экспорт списка заблокированных элементов ==================== //
+
+// ================== Функция импорт заблокированных элементов ==================== //
+function importBlockedItems(counter) {
+    console.log("[Content] Importing blocked items...");
+    try {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.onchange = (event) => {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        blockedEmotes = [];
+                        blockedChannels = [];
+                        blockedEmoteIDs.clear();
+                        blockedChannelIDs.clear();
+                        newlyAddedIds.clear();
+
+                        const validEmotes = (data.blockedEmotes || []).filter(item =>
+                            item.id && item.platform && item.emoteName && item.emoteUrl && item.date
+                        );
+                        const validChannels = (data.blockedChannels || []).filter(item =>
+                            item.id && item.platform && item.emoteName && item.date
+                        );
+
+                        // Мигрируем старый формат для blockedChannels
+                        blockedChannels = validChannels.map(item => {
+                            if (item.channelName && item.prefix) {
+                                return item;
+                            }
+                            const prefix = item.name || item.emoteName.split(/[^a-zA-Z0-9]/)[0] || item.emoteName;
+                            return {
+                                id: item.id,
+                                channelName: prefix,
+                                prefix: prefix,
+                                platform: item.platform,
+                                emoteName: item.emoteName || item.name || 'Unnamed',
+                                date: item.date
+                            };
+                        });
+
+                        blockedEmotes = validEmotes;
+                        blockedEmoteIDs = new Set(blockedEmotes.map(e => e.id));
+                        blockedChannelIDs = new Set(blockedChannels.map(c => c.id));
+                        newlyAddedIds = new Set();
+                        processedEmotes = new WeakMap();
+
+                        console.log("[Content] Imported:", {
+                            blockedEmotes: blockedEmotes.length,
+                            blockedChannels: blockedChannels.length,
+                            invalidEmotes: (data.blockedEmotes || []).length - validEmotes.length,
+                            invalidChannels: (data.blockedChannels || []).length - validChannels.length
+                        });
+
+                        setStorage('blockedEmotes', blockedEmotes);
+                        setStorage('blockedChannels', blockedChannels);
+                        toggleEmotesInChat(true);
+
+                        const blockedList = uiElements?.blockedList || document.getElementById('blocked-list');
+                        if (blockedList) {
+                            console.log("[Content] Updating blocked list after import...");
+                            blockedList.innerHTML = '';
+                            updateBlockedList(blockedList, getBlockedItems());
+                            requestAnimationFrame(() => {
+                                blockedList.offsetHeight;
+                                console.log("[Content] Blocked list DOM updated after import");
+                            });
+                        } else {
+                            console.error("[Content] Blocked list element not found in DOM");
+                        }
+
+                        updateCounter(counter);
+                        console.log("[Content] Import successful");
+                    } catch (error) {
+                        console.error("[Content] Import error:", error);
+                    }
+                };
+                reader.readAsText(file);
+            }
+        };
+        input.click();
+    } catch (error) {
+        console.error("[Content] Import error:", error);
+    }
+}
+
+// ================== end of Функция для импорта список заблокированных элементов ================= //
+
+
+ // ======== Функция для блокировки эмодзи в чате ============= //
+// Используется в качестве обратного вызова для MutationObserver
+
+function toggleEmotesInChat(immediate = false) {
+    console.log(`[${new Date().toISOString()}] [Blocking] toggleEmotesInChat started (immediate: ${immediate}, isBlockingEnabled: ${isBlockingEnabled})`);
+    const startTime = performance.now();
+
+    // Сбрасываем кэш, чтобы пересмотреть все эмодзи
+    processedEmotes = new WeakMap();
+
+    // Находим основной контейнер чата
+    const chatContainer = document.querySelector('.chat-scrollable-area__message-container') || document.querySelector('.chat-room__content');
+    if (!chatContainer) {
+        console.log("[Blocking] Chat container not found in toggleEmotesInChat");
+        return;
+    }
+
+    // Обрабатываем весь чат
+    toggleEmotesInNode(chatContainer, immediate);
+
+    // Обрабатываем iframes, если они есть
+    const iframes = document.querySelectorAll('iframe');
+    iframes.forEach(iframe => {
+        try {
+            const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+            if (iframeDoc) {
+                console.log(`[Blocking] Processing iframe: ${iframe.src}`);
+                const iframeChatContainer = iframeDoc.querySelector('.chat-scrollable-area__message-container') || iframeDoc.querySelector('.chat-room__content');
+                if (iframeChatContainer) {
+                    toggleEmotesInNode(iframeChatContainer, immediate);
+                }
+            }
+        } catch (error) {
+            console.warn(`[Blocking] Cannot access iframe content: ${error}`);
+        }
+    });
+
+    console.log(`[Blocking] toggleEmotesInChat finished in ${performance.now() - startTime} ms`);
+}
+
+ // ============= end of Функция для блокировки эмодзи в чате ============= //
+
+
+// ================== Функции для включения и отключения блокировки ==================== //
+
+function disableBlocking() {
+    console.log("[Content] Disabling blocking...");
+    try {
+        isBlockingEnabled = false;
+        setStorage('isBlockingEnabled', false);
+        console.log("[Content] isBlockingEnabled set to:", isBlockingEnabled);
+        toggleEmotesInChat(true);
+        console.log("[Content] toggleEmotesInChat called");
+        if (uiElements && uiElements.unblockAllButton && uiElements.blockAllButton) {
+            uiElements.unblockAllButton.classList.add('active');
+            uiElements.blockAllButton.classList.remove('active');
+            console.log("[Content] UI updated: unblockAllButton active");
+        } else {
+            console.warn("[Content] UI elements missing:", {
+                uiElements,
+                unblockAllButton: uiElements?.unblockAllButton,
+                blockAllButton: uiElements?.blockAllButton
+            });
+        }
+    } catch (error) {
+        console.error("[Content] Error in disableBlocking:", error);
+    }
+}
+
+function enableBlocking() {
+    console.log("[Content] Enabling blocking...");
+    try {
+        isBlockingEnabled = true;
+        setStorage('isBlockingEnabled', true);
+        console.log("[Content] isBlockingEnabled set to:", isBlockingEnabled);
+        toggleEmotesInChat(true);
+        console.log("[Content] toggleEmotesInChat called");
+        if (uiElements && uiElements.blockAllButton && uiElements.unblockAllButton) {
+            uiElements.blockAllButton.classList.add('active');
+            uiElements.unblockAllButton.classList.remove('active');
+            console.log("[Content] UI updated: blockAllButton active");
+        } else {
+            console.warn("[Content] UI elements missing:", {
+                uiElements,
+                unblockAllButton: uiElements?.unblockAllButton,
+                blockAllButton: uiElements?.blockAllButton
+            });
+        }
+    } catch (error) {
+        console.error("[Content] Error in enableBlocking:", error);
+    }
+}
+
+// ================ end of Функции для включения и отключения блокировки ================ //
+
+// ================= Функция инициализации ==================== //
+
+function init() {
+    console.log("[Content] Starting init function...");
+    try {
+        initBlocking();
+
+        uiElements = createUI();
+        if (uiElements) {
+            console.log("[Content] UI created:", uiElements);
+
+            bindButtonHandlers(uiElements, {
+                search: () => filterBlockedList(uiElements.searchInput.value.trim()),
+                add: () => {
+                    const value = uiElements.addInput.value.trim();
+                    if (value) {
+                        const platform = uiElements.platformSelect.value;
+                        let emoteUrl = '';
+                        let emoteName = value;
+                        let emotePrefix = value;
+
+                        if (platform !== 'TwitchChannel') {
+                            if (!value.startsWith('http')) {
+                                if (platform === '7tv') {
+                                    emoteUrl = `https://cdn.7tv.app/emote/${value}/2x.webp`;
+                                } else if (platform === 'bttTV') {
+                                    emoteUrl = `https://cdn.betterttv.net/emote/${value}/2x.webp`;
+                                } else if (platform === 'ffz') {
+                                    emoteUrl = `https://cdn.frankerfacez.com/emote/${value}/2`;
+                                }
+                            } else {
+                                emoteUrl = value;
+                                if (platform === 'bttTV' && !emoteUrl.match(/\/\dx\.webp$/)) {
+                                    emoteUrl = `${emoteUrl}/2x.webp`;
+                                } else if (platform === '7tv' && !emoteUrl.match(/\/\dx\.webp$/)) {
+                                    emoteUrl = `${emoteUrl}/2x.webp`;
+                                }
+                            }
+                        }
+
+                        const item = addEmoteOrChannel(
+                            emotePrefix,
+                            platform,
+                            emoteName,
+                            emoteUrl,
+                            null,
+                            platform === 'TwitchChannel'
+                        );
+                        console.log("[Content] Added via UI:", item);
+                        uiElements.addInput.value = '';
+                    }
+                },
+                clearAll: () => clearAllBlockedItems(uiElements.counter),
+                export: () => exportBlockedItems(),
+                import: () => importBlockedItems(uiElements.counter),
+                unblockAll: () => disableBlocking(),
+                blockAll: () => enableBlocking(),
+                showStats: () => {
+                    animateModalOpen(uiElements.chartModal, () => {
+                        showStatsChart(uiElements.statsChart);
+                        uiElements.statsChart.style.width = '100%';
+                        uiElements.statsChart.style.height = '400px';
+                        if (uiElements.statsChart.chart) {
+                            uiElements.statsChart.chart.resize();
+                        }
+                    });
+                },
+                closeChart: () => {
+                    animateModalClose(uiElements.chartModal);
+                },
+                platformChange: () => console.log("[Content] Platform changed:", uiElements.platformSelect.value),
+                themeChange: () => {
+                    const selectedTheme = uiElements.themeSelect.value;
+                    const themeStylesheet = document.getElementById('theme-stylesheet');
+                    if (themeStylesheet) {
+                        let themeUrl;
+                        switch (selectedTheme) {
+                            case 'amethystGlow':
+                                themeUrl = chrome.runtime.getURL('css/themes/amethystGlow.css');
+                                break;
+                            case 'amberBlaze':
+                                themeUrl = chrome.runtime.getURL('css/themes/amberBlaze.css');
+                                break;
+                            case 'glassmorphism':
+                                themeUrl = chrome.runtime.getURL('css/themes/glassmorphism.css');
+                                break;
+                            case 'dark':
+                                themeUrl = chrome.runtime.getURL('css/themes/dark.css');
+                                break;
+                            case 'sapphireBlue':
+                                themeUrl = chrome.runtime.getURL('css/themes/sapphireBlue.css');
+                                break;
+                            case 'darkRaspberry':
+                                themeUrl = chrome.runtime.getURL('css/themes/darkRaspberry.css');
+                                break;
+                            case 'lightMode':
+                                themeUrl = chrome.runtime.getURL('css/themes/lightMode.css');
+                                break;
+                            case 'deepSeaTurquoise':
+                                themeUrl = chrome.runtime.getURL('css/themes/deepSeaTurquoise.css');
+                                break;
+                            default:
+                                themeUrl = chrome.runtime.getURL('css/styles.css');
+                        }
+                        themeStylesheet.href = themeUrl;
+                        setStorage('selectedTheme', selectedTheme);
+                        console.log("[Content] Theme changed to:", selectedTheme);
+                    }
+                },
+                toggleLogging: () => {
+                    console.log("[Debug] toggleLogging handler called");
+                    const newState = !isLoggingEnabled();
+                    console.log("[Debug] New logging state:", newState);
+                    setLoggingEnabled(newState);
+                    console.log("[Debug] Button element:", uiElements.toggleLoggingButton);
+                    if (uiElements.toggleLoggingButton) {
+                        uiElements.toggleLoggingButton.textContent = newState ? 'Logging On' : 'Logging Off';
+                        uiElements.toggleLoggingButton.classList.toggle('active', newState);
+                    } else {
+                        console.error("[Debug] toggleLoggingButton is undefined");
+                    }
+                    console.log(`[Content] Logging toggled to: ${newState ? 'enabled' : 'disabled'}`);
+                }
+            });
+
+            uiElements.chartModal.addEventListener('click', (e) => {
+                if (e.target === uiElements.chartModal) {
+                    animateModalClose(uiElements.chartModal);
+                }
+            });
+
+            if (uiElements && uiElements.blockAllButton && uiElements.unblockAllButton) {
+                if (isBlockingEnabled) {
+                    uiElements.blockAllButton.classList.add('active');
+                    uiElements.unblockAllButton.classList.remove('active');
+                } else {
+                    uiElements.unblockAllButton.classList.add('active');
+                    uiElements.blockAllButton.classList.remove('active');
+                }
+            }
+
+            if (uiElements && uiElements.toggleLoggingButton) {
+                uiElements.toggleLoggingButton.classList.toggle('active', isLoggingEnabled());
+                uiElements.toggleLoggingButton.textContent = isLoggingEnabled() ? 'Logging On' : 'Logging Off';
+                console.log("[Debug] Initial toggleLoggingButton state:", isLoggingEnabled());
+            } else {
+                console.error("[Debug] toggleLoggingButton not found during init");
+            }
+
+            const savedTheme = getStorage('selectedTheme', 'default');
+            uiElements.themeSelect.value = savedTheme;
+            const themeStylesheet = document.getElementById('theme-stylesheet');
+            if (themeStylesheet) {
+                let themeUrl;
+                switch (savedTheme) {
+                    case 'amethystGlow':
+                        themeUrl = chrome.runtime.getURL('css/themes/amethystGlow.css');
+                        break;
+                    case 'amberBlaze':
+                        themeUrl = chrome.runtime.getURL('css/themes/amberBlaze.css');
+                        break;
+                    case 'glassmorphism':
+                        themeUrl = chrome.runtime.getURL('css/themes/glassmorphism.css');
+                        break;
+                    case 'dark':
+                        themeUrl = chrome.runtime.getURL('css/themes/dark.css');
+                        break;
+                    case 'sapphireBlue':
+                        themeUrl = chrome.runtime.getURL('css/themes/sapphireBlue.css');
+                        break;
+                    case 'darkRaspberry':
+                        themeUrl = chrome.runtime.getURL('css/themes/darkRaspberry.css');
+                        break;
+                    case 'lightMode':
+                        themeUrl = chrome.runtime.getURL('css/themes/lightMode.css');
+                        break;
+                    case 'deepSeaTurquoise':
+                        themeUrl = chrome.runtime.getURL('css/themes/deepSeaTurquoise.css');
+                        break;
+                    default:
+                        themeUrl = chrome.runtime.getURL('css/styles.css');
+                }
+                themeStylesheet.href = themeUrl;
+                console.log("[Content] Loaded theme:", savedTheme);
+            }
+
+            updateBlockedList(uiElements.blockedList, getBlockedItems());
+            updateCounter(uiElements.counter);
+        }
+
+        initContextMenu();
+
+        if (!window.location.href.includes('player.twitch.tv') && !window.location.href.includes('twitch.tv/embed')) {
+            startRootObserver();
+        }
+
+        monitorChannelChange();
+
+        console.log("[Content] Initialization complete");
+    } catch (error) {
+        console.error("[Content] Initialization error:", error);
+    }
+}
+
+// =================== end of init function ==================== //
+
+// =================== Стили для подсветки и блокировки элементов ==================== //
+const highlightStyle = document.createElement('style');
+highlightStyle.innerHTML = `
+/* Стили для крестика в попап модифицированных смайлов*/
+#emote-selection-popup .close-button {
+    position: fixed;
+    top: 0px;
+    right: 20px;
+    cursor: pointer;
+    color: rgb(85, 255, 161);
+    font-weight: bold;
+} 
+ .emote-options {
+    position: relative;
+    top: 8px;
+    width: 205px;
+}
+/* Подсветка текста в поиске */
+.highlight {
+    background-color: #ffff00; /* Жёлтый фон */
+    color:hsl(0, 0.00%, 0.00%) !important; /* Чёрный текст */
+    padding: 1px 2px; /* Отступы для красоты */
+    border-radius: 4px; /* Скругленные углы */
+}
+
+.last-item-highlight {
+        background-color: #115a14;
+        transition: background-color 0.3s ease;
+        color: #cfcfcf;
+    }
+    .blocked-item {
+        padding: 5px;
+        border-bottom: 1px solid #ccc;
+    }
+    .new-item {
+        background-color: #307c30;
+    }
+    .delete-button {
+        cursor: pointer;
+        color: #cfcfcf;
+    } 
+       
+        /* стили  для регулировки размеров панели  */
+
+    .resize-handle {
+        position: absolute;
+        background: transparent;
+        z-index: 10001;
+    }
+
+    .resize-handle.top, .resize-handle.bottom {
+        width: 100%;
+        height: 8px;
+        left: 0;
+        cursor: ns-resize;
+    }
+
+    .resize-handle.top {
+        top: -4px;
+    }
+
+    .resize-handle.bottom {
+        bottom: -4px;
+    }
+
+    .resize-handle.left, .resize-handle.right {
+        height: 100%;
+        width: 8px;
+        top: 0;
+        cursor: ew-resize;
+    }
+
+    .resize-handle.left {
+        left: -4px;
+    }
+
+    .resize-handle.right {
+        right: -4px;
+    }
+
+    .resize-handle.top-left, .resize-handle.top-right,
+    .resize-handle.bottom-left, .resize-handle.bottom-right {
+        width: 12px;
+        height: 12px;
+    }
+
+    .resize-handle.top-left {
+        top: -6px;
+        left: -6px;
+        cursor: nwse-resize;
+    }
+
+    .resize-handle.top-right {
+        top: -6px;
+        right: -6px;
+        cursor: nesw-resize;
+    }
+
+    .resize-handle.bottom-left {
+        bottom: -6px;
+        left: -6px;
+        cursor: nesw-resize;
+    }
+
+    .resize-handle.bottom-right {
+        bottom: -6px;
+        right: -6px;
+        cursor: nwse-resize;
+    } 
+`;
+document.head.appendChild(highlightStyle);
+
+// =================== end of Стили для подсветки и блокировки элементов ==================== //
+
+// =================== Инициализация скрипта ==================== //
+init();
+console.log("[Twitch Emote Blocker] Script initialization triggered");
+// =================== end of Инициализация скрипта ==================== //  
