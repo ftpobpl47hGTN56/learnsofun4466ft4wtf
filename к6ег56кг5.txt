@@ -201,6 +201,7 @@ function checkBlockingStatus() {
     );
 
     const chatContainer = document.querySelector('.chat-scrollable-area__message-container') ||
+                            document.querySelector('.chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote') ||        
                          document.querySelector('.chat-room__content') ||
                          document.querySelector('[data-a-target="chat-room-content"]') ||
                             document.querySelector('. chat-line__message tw-relative') ||
@@ -288,6 +289,7 @@ function restartBlockingLogic() {
     observerIsActive = false;
 
     const chatContainer = document.querySelector('.chat-scrollable-area__message-container') ||
+                            document.querySelector('.chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote') ||                
                          document.querySelector('.chat-room__content') ||
                          document.querySelector('[data-a-target="chat-room-content"]') ||
                          document.querySelector('. chat-line__message tw-relative') ||
@@ -352,6 +354,7 @@ function startWatchdog() {
 
         const isWorking = checkBlockingStatus();
         const chatContainer = document.querySelector('.chat-scrollable-area__message-container') ||
+                                document.querySelector('.chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote') ||    
                              document.querySelector('.chat-room__content') ||
                              document.querySelector('[data-a-target="chat-room-content"]') ||
                              document.querySelector('. chat-line__message tw-relative') ||
@@ -455,6 +458,7 @@ function startRootObserver() {
 
             // Проверяем наличие контейнера чата
             const chatContainer = document.querySelector('.chat-scrollable-area__message-container') ||
+                                document.querySelector('.chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote') ||
                                  document.querySelector('.chat-room__content') ||
                                  document.querySelector('[data-a-target="chat-room-content"]') ||
                                  document.querySelector('. chat-line__message tw-relative') ||
@@ -539,14 +543,13 @@ function showEmoteSelectionPopup(emotes, callback) {
     const popup = document.createElement('div');
     popup.id = 'emote-selection-popup';
     popup.innerHTML = `
-        <div class="close-button">✕</div>
+        <div class="close-button" style="cursor:pointer;position:absolute;top:6px;right:10px;font-size:20px;">✕</div>
         <div class="emote-options"></div>
-        
     `;
     document.body.appendChild(popup);
     console.log("[Content] Popup element created and appended to body");
 
-    // Инлайн-стили (твои)
+    // Инлайн-стили для попапа
     popup.style.position = 'fixed';
     popup.style.background = 'rgb(56, 90, 80)';
     popup.style.color = 'rgb(235, 235, 235)';
@@ -554,7 +557,7 @@ function showEmoteSelectionPopup(emotes, callback) {
     popup.style.fontSize = '16px';
     popup.style.border = '1px solid #12b6a7';
     popup.style.borderRadius = '8px';
-    popup.style.padding = '10px';
+    popup.style.padding = '10px 10px 10px 10px';
     popup.style.zIndex = '10001';
     popup.style.maxWidth = '320px';
     popup.style.maxHeight = '500px';
@@ -564,11 +567,11 @@ function showEmoteSelectionPopup(emotes, callback) {
     popup.style.transform = 'scale(0.9)';
     popup.style.display = 'block';
     popup.style.visibility = 'visible';
-
-    // Жёстко задаём left и top
     popup.style.right = '310px';
-    popup.style.top = '385px'; // Измени на нужный top, например, '500px'
-    console.log("[Content] Popup positioned with inline styles:", { left: popup.style.left, top: popup.style.top });
+    popup.style.top = '385px';
+
+    // Немного воздуха для close-button
+    popup.style.paddingTop = '32px';
 
     const optionsContainer = popup.querySelector('.emote-options');
 
@@ -578,25 +581,63 @@ function showEmoteSelectionPopup(emotes, callback) {
         option.className = 'emote-option';
         option.style.display = 'flex';
         option.style.alignItems = 'center';
-        option.style.padding = '8px';
-        option.style.borderBottom = '1px solid rgba(115, 209, 204, 0.66)';
-        option.innerHTML = `
-            <img src="${emote.src || ''}" alt="${emote.alt || 'Emote'}" style="width: 24px; height: 24px; margin-right: 10px;" />
-            <div class="emote-info" style="flex-grow: 1; font-size: 14px;">
-                <span>${emote.alt || 'Unnamed'} (${emote.platform})</span>
-            </div>
-            <button class="block-button" style="background: #ff5555; color: #ffffff; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Block</button>
-        `;
-        const blockButton = option.querySelector('.block-button');
+        option.style.justifyContent = 'space-between';
+        option.style.padding = '8px 0';
+        option.style.borderBottom = '1px solid rgba(115, 209, 204, 0.16)';
+        option.style.gap = '10px';
+
+        // Левая часть: картинка + название
+        const left = document.createElement('div');
+        left.style.display = 'flex';
+        left.style.alignItems = 'center';
+        left.style.minWidth = '0';
+
+        const img = document.createElement('img');
+        img.src = emote.src || '';
+        img.alt = emote.alt || 'Emote';
+        img.style.width = '24px';
+        img.style.height = '24px';
+        img.style.marginRight = '10px';
+        img.style.flexShrink = '0';
+
+        const info = document.createElement('div');
+        info.className = 'emote-info';
+        info.style.fontSize = '14px';
+        info.style.whiteSpace = 'nowrap';
+        info.style.overflow = 'hidden';
+        info.style.textOverflow = 'ellipsis';
+        info.innerHTML = `<span>${emote.alt || 'Unnamed'} <span style="user-select:none;">(${emote.platform})</span></span>`;
+
+        left.appendChild(img);
+        left.appendChild(info);
+
+        // Правая часть: кнопка Block
+        const blockButton = document.createElement('button');
+        blockButton.className = 'block-button';
+        blockButton.type = 'button';
+        blockButton.textContent = 'Block';
+        blockButton.style.background = ' #ff5555';
+        blockButton.style.color = ' #ffffff';
+        blockButton.style.border = 'none';
+        blockButton.style.padding = '4px 8px';
+        blockButton.style.borderRadius = '4px';
+        blockButton.style.cursor = 'pointer';
+        blockButton.style.fontSize = '12px';
+        blockButton.style.marginLeft = '10px';
+        blockButton.style.flexShrink = '0';
+        blockButton.style.userSelect = 'none';
+
         blockButton.onclick = () => {
             console.log("[Content] Block button clicked for emote:", emote);
             callback(emote);
             if (emote.element) {
                 emote.element.style.display = 'none';
                 console.log("[Content] Emote element hidden:", emote.alt);
-                const parentContainer = emote.element.closest('.ffz--inline, .chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote, .chat-line__message, .chat-image');
+                const parentContainer = emote.element.closest('.ffz--inline, .chat-line__message, .chat-image');
                 if (parentContainer) {
-                    const allEmotes = parentContainer.querySelectorAll('img.chat-line__message--emote, .ffz-emote, .seventv-emote, .bttv-emote, .twitch-emote, .chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote, .chat-image');
+                    const allEmotes = parentContainer.querySelectorAll(
+                        'img.chat-line__message--emote, .ffz-emote, .seventv-emote, .bttv-emote, .twitch-emote, .chat-image'
+                    );
                     const allBlocked = Array.from(allEmotes).every(e => e.style.display === 'none');
                     if (allBlocked) {
                         parentContainer.style.display = 'none';
@@ -606,12 +647,16 @@ function showEmoteSelectionPopup(emotes, callback) {
             }
             popup.remove();
         };
+
+        option.appendChild(left);
+        option.appendChild(blockButton);
         optionsContainer.appendChild(option);
     });
     console.log("[Content] Popup populated with", emotes.length, "emotes");
 
     // Кнопка закрытия
-    popup.querySelector('.close-button').onclick = () => {
+    const closeButton = popup.querySelector('.close-button');
+    closeButton.onclick = () => {
         console.log("[Content] Emote selection popup closed via close button");
         popup.remove();
     };
@@ -1092,6 +1137,7 @@ function startRootObserver() {
         debounceTimeout = setTimeout(() => {
             console.log("[Blocking] RootObserver: Processing DOM changes, mutations count:", mutations.length);
             const chatContainer = document.querySelector('.chat-scrollable-area__message-container') ||
+                                 document.querySelector('.chat-image chat-line__message--emote ffz--pointer-events ffz-tooltip ffz-emote') ||
                                  document.querySelector('.chat-room__content') ||
                                  document.querySelector('[data-a-target="chat-room-content"]') ||
                                  document.querySelector('.chat-list--default');
@@ -1535,7 +1581,7 @@ function updateChildElements() {
         // Добавляем/удаляем класс hidden
         themeSelectorContainer.classList.toggle('hidden', isNarrow);
 
-        const themeSelect = themeSelectorContainer.querySelector('#theme-select');
+        const themeSelect = themeSelectorContainer.querySelector(' #theme-select');
         if (themeSelect) {
             const selectWidth = 145;
             themeSelect.style.width = `${selectWidth}px`;
@@ -1552,8 +1598,8 @@ if (searchInput) {
     searchInput.style.width = `${panelWidth - 377}px`;
     searchInput.classList.toggle('hidden', isNarrow);
 
-    const searchInputField = searchInput.querySelector('#search-input');
-    const searchButton = searchInput.querySelector('#search-button');
+    const searchInputField = searchInput.querySelector(' #search-input');
+    const searchButton = searchInput.querySelector(' #search-button');
     if (searchInputField && searchButton) {
         const buttonWidth = 80;
         const gap = 10;
@@ -1574,9 +1620,9 @@ if (inputContainer) {
     inputContainer.style.width = `${panelWidth - 222}px`;
     inputContainer.classList.toggle('hidden', isNarrow);
 
-    const platformSelect = inputContainer.querySelector('#platform-select');
-    const addInput = inputContainer.querySelector('#add-input');
-    const addButton = inputContainer.querySelector('#add-button');
+    const platformSelect = inputContainer.querySelector(' #platform-select');
+    const addInput = inputContainer.querySelector(' #add-input');
+    const addButton = inputContainer.querySelector(' #add-button');
     if (platformSelect && addInput && addButton) {
         const selectWidth = 150;
         const buttonWidth = 80;
@@ -1607,7 +1653,7 @@ if (inputContainer) {
     
 
     // Обновляем позицию и ширину #counter
-    const counter = panel.querySelector('#counter');
+    const counter = panel.querySelector(' #counter');
     if (counter) {
         counter.style.maxWidth = `${Math.min(445, 455 * (panelWidth / 750))}px`; // Увеличиваем на 35px
         counter.style.right = `10px`; // Позиция в правом углу
@@ -1881,7 +1927,94 @@ function bindButtonHandlers(elements, handlers) {
 
 // ==================== end of bindButtonHandlers ====================== //
 
-// ============ content.js ================ //
+// ======= функция для получения эмодзи из тултипа getFfzTooltipEmotes ======== //
+function getFfzTooltipEmotes() {
+    const tooltip = document.querySelector('.ffz__tooltip');
+    if (!tooltip) return [];
+    const imgs = Array.from(tooltip.querySelectorAll('img')).filter(img =>
+        img.classList.contains('chat-image') ||
+        img.classList.contains('chat-line__message--emote') ||
+        img.classList.contains('ffz-emote') ||
+        img.classList.contains('seventv-emote') ||
+        img.classList.contains('bttv-emote') ||
+        img.classList.contains('twitch-emote') ||
+        img.getAttribute('data-provider')
+    );
+    // Дедупликация по data-id+src
+    const seen = new Set();
+    const uniqueImgs = imgs.filter(img => {
+        const key = (img.getAttribute('data-id') || '') + (img.src || '');
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+    return uniqueImgs.map(img => ({
+        src: img.src,
+        alt: img.getAttribute('alt') || img.getAttribute('data-emote-name') || '',
+        platform: img.getAttribute('data-provider') || '',
+        element: img,
+        id: img.getAttribute('data-id') || ''
+    }));
+}
+// ================= end of getFfzTooltipEmotes ================ //
+
+// ==== функция для поиска контейнера и эмодзи findEmoteContainerAndEmotes ======== //
+// Функция для поиска контейнера и эмодзи
+
+
+function findEmoteContainerAndEmotes(clickedImg) {
+    const messageContainer = clickedImg.closest(
+        '.message, .chat-line__message, .chat-line__message-container, .ffz--inline, .modified-emote, .scaled-modified-emote, [class*="modified-emote"]'
+    ) || clickedImg.parentElement || clickedImg;
+
+    if (!messageContainer) {
+        return [{
+            src: clickedImg.src,
+            alt: clickedImg.getAttribute('alt') || clickedImg.getAttribute('data-emote-name') || '',
+            platform: clickedImg.getAttribute('data-provider') || '',
+            element: clickedImg,
+            id: clickedImg.getAttribute('data-id') || ''
+        }];
+    }
+
+    // 1. Получаем основной смайл
+    const mainEmote = getMainEmoteFromContainer(messageContainer);
+
+    // 2. Получаем остальные смайлы (без основного)
+    const otherImgs = Array.from(messageContainer.querySelectorAll('img')).filter(img => img !== mainEmote);
+
+    // 3. Собираем итоговый список: сначала основной, потом остальные
+    const allImgs = mainEmote ? [mainEmote, ...otherImgs] : otherImgs;
+
+    // Дальше фильтруем по твоей логике (по видимости и нужным классам)
+    const filtered = allImgs.filter(img => {
+        const style = window.getComputedStyle(img);
+        const isVisible = style.display !== 'none' && style.opacity !== '0' && img.offsetWidth > 0 && img.offsetHeight > 0;
+        const isEmote =
+            img.classList.contains('chat-image') ||
+            img.classList.contains('chat-line__message--emote') ||
+            img.classList.contains('ffz-emote') ||
+            img.classList.contains('seventv-emote') ||
+            img.classList.contains('bttv-emote') ||
+            img.classList.contains('twitch-emote') ||
+            img.classList.contains('modified-emote') ||
+            img.classList.contains('scaled-modified-emote') ||
+            img.getAttribute('data-provider');
+        return img.src && isVisible && isEmote;
+    });
+
+    return filtered.map(img => ({
+        src: img.src,
+        alt: img.getAttribute('alt') || img.getAttribute('data-emote-name') || '',
+        platform: img.getAttribute('data-provider') || '',
+        element: img,
+        id: img.getAttribute('data-id') || ''
+    }));
+}
+
+// ================ end of findEmoteContainerAndEmotes ================ //
+
+// ============ initContextMenu  ================ //
 
 function initContextMenu() {
     console.log("[Content] Initializing context menu...");
@@ -1947,7 +2080,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const frame = frameId && document.querySelectorAll('iframe')[frameId]
                     ? document.querySelectorAll('iframe')[frameId]
                     : document;
-                const images = frame.querySelectorAll(`img[src="${srcUrl}"], img[srcset*="${srcUrl}"]`);
+                const images = frame.querySelectorAll(`img[src="${srcUrl}"], img[srcset*="${srcUrl}"], .chat-line__message img, .seventv-emote, .bttv-emote, .ffz-emote, .twitch-emote, .chat-message-emote`);
                 for (const img of images) {
                     if (img.src === srcUrl || img.getAttribute('srcset')?.includes(srcUrl)) {
                         targetElement = img;
@@ -2026,74 +2159,46 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const frame = document;
                 console.log("[Content] Frame selected for search:", frame);
 
-                // Получаем id эмодзи из src
-                let emoteId = '';
-                try {
-                    // Попробуем получить id из ссылки 7tv/ffz/bttv
-                    emoteId = (srcUrl.match(/(?:emote|Emote|emo)\/([0-9A-Za-z]+)/) || [])[1] ||
-                              (srcUrl.split('/')[4] || '');
-                } catch { emoteId = srcUrl; }
-
-                // Находим элемент эмодзи
-                const emoteElement = frame.querySelector(
-                    `img[src*="${emoteId}"], img[srcset*="${emoteId}"]`
-                );
+                const emoteId = srcUrl.split('/')[4];
+                const emoteElement = frame.querySelector(`img[src*="${emoteId}"], img[srcset*="${emoteId}"], .chat-image[src*="${emoteId}"], .ffz-emote[src*="${emoteId}"], .chat-line__message--emote[src*="${emoteId}"]`);
                 console.log("[Content] Searched for emoteElement with emoteId:", emoteId, "Result:", emoteElement);
 
-                // Находим контейнер (сообщение чата или .ffz--inline)
-                const container = emoteElement?.closest(
-                    '.chat-line__message-container, .ffz--inline, .chat-line__message, .modified-emote'
-                ) || emoteElement?.parentElement || emoteElement;
+                const container = emoteElement?.closest('.chat-line__message-container, .chat-line__message, .ffz--inline, .modified-emote') || emoteElement?.parentElement || emoteElement;
                 console.log("[Content] Container found:", container);
 
                 if (!emoteElement && !container) {
-                    // fallback на одиночный смайл
                     console.warn("[Content] No emote element or container found for srcUrl:", srcUrl);
                     emotes = [{
                         src: srcUrl,
                         alt: 'Unnamed',
-                        platform: srcUrl.includes('7tv.app') ? '7tv' :
-                                  srcUrl.includes('betterttv.net') ? 'bttTV' :
-                                  srcUrl.includes('frankerfacez.com') ? 'ffz' :
+                        platform: srcUrl.includes('7tv.app') ? '7tv' : 
+                                  srcUrl.includes('betterttv.net') ? 'bttTV' : 
+                                  srcUrl.includes('frankerfacez.com') ? 'ffz' : 
                                   srcUrl.includes('twemoji') ? 'emoji' : 'TwitchChannel',
                         element: null,
                         id: emoteId || ''
                     }];
                     console.log("[Content] Fallback: Created single emote entry:", emotes);
                 } else {
-                    // Новый алгоритм: собираем все img внутри контейнера, фильтруем и убираем дубли
-                    const allImgs = Array.from(container.querySelectorAll('img'));
-                    const filteredImgs = allImgs.filter(img => {
-                        const style = window.getComputedStyle(img);
-                        const isVisible = style.display !== 'none' && style.opacity !== '0' && img.width > 0 && img.height > 0;
-                        const isEmote =
-                            img.classList.contains('chat-image') ||
-                            img.classList.contains('chat-line__message--emote') ||
-                            img.classList.contains('ffz-emote') ||
-                            img.classList.contains('seventv-emote') ||
-                            img.classList.contains('bttv-emote') ||
-                            img.classList.contains('twitch-emote') ||
-                            img.getAttribute('data-provider');
-                        return img.src && isVisible && isEmote;
-                    });
-                    // Убираем дубли по data-id или src
-                    const seen = new Set();
-                    const uniqueImgs = filteredImgs.filter(img => {
-                        const key = img.getAttribute('data-id') || img.src;
-                        if (seen.has(key)) return false;
-                        seen.add(key);
-                        return true;
-                    });
-                    // Преобразуем в массив emotes
-                    emotes = uniqueImgs.map(img => {
+                    const images = container?.querySelectorAll('img.chat-image, img.chat-line__message--emote, .ffz-emote, .seventv-emote, .bttv-emote, .twitch-emote, img[src*=".7tv.app"], img[src*=".betterttv.net"], img[src*=".frankerfacez.com"], img[src*=".twitchcdn.net"], img[data-provider="emoji"]') || [];
+                    console.log("[Content] Raw images:", Array.from(images).map(img => ({
+                        src: img.src,
+                        alt: img.getAttribute('alt'),
+                        dataEmoteName: img.getAttribute('data-emote-name'),
+                        dataProvider: img.getAttribute('data-provider'),
+                        dataSet: img.getAttribute('data-set'),
+                        dataCode: img.getAttribute('data-code')
+                    })));
+                    emotes = Array.from(images).map(img => {
                         const emoteUrl = img.src || img.getAttribute('srcset')?.split(' ')[0] || '';
                         const emoteAlt = img.getAttribute('alt') ||
-                                         img.getAttribute('data-emote-name') ||
-                                         img.getAttribute('title') ||
-                                         img.getAttribute('data-code') || '';
+                                        img.getAttribute('data-emote-name') ||
+                                        img.getAttribute('title') ||
+                                        img.getAttribute('data-code') || '';
                         const dataProvider = img.getAttribute('data-provider') || '';
                         const dataSet = img.getAttribute('data-set') || '';
                         let platform = 'TwitchChannel';
+
                         if (emoteUrl.includes('7tv.app') || dataProvider === '7tv' || dataSet.includes('seventv_emotes')) {
                             platform = '7tv';
                         } else if (emoteUrl.includes('betterttv.net') || dataProvider === 'bttv') {
@@ -2103,6 +2208,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         } else if (dataProvider === 'emoji') {
                             platform = 'emoji';
                         }
+
                         return {
                             src: emoteUrl,
                             alt: emoteAlt.trim() || 'Unnamed',
@@ -2111,6 +2217,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                             id: img.getAttribute('data-emote-id') || img.getAttribute('data-id') || ''
                         };
                     }).filter(emote => emote.src || emote.alt);
+
+                    // Добавляем vp вручную, если не найден
+                    if (!emotes.some(emote => emote.alt === 'vp') && srcUrl.includes('01FF4NRKKR000FF5VVCKV49JZ2')) {
+                        emotes.push({
+                            src: srcUrl,
+                            alt: 'vp',
+                            platform: '7tv',
+                            element: null,
+                            id: '01FF4NRKKR000FF5VVCKV49JZ2'
+                        });
+                        console.log("[Content] Manually added vp to emotes");
+                    }
+
                     targetElement = container;
                     console.log('[Content] Found emotes in container:', emotes);
                 }
@@ -2120,9 +2239,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 emotes = [{
                     src: srcUrl,
                     alt: 'Unnamed',
-                    platform: srcUrl.includes('7tv.app') ? '7tv' :
-                              srcUrl.includes('betterttv.net') ? 'bttTV' :
-                              srcUrl.includes('frankerfacez.com') ? 'ffz' :
+                    platform: srcUrl.includes('7tv.app') ? '7tv' : 
+                              srcUrl.includes('betterttv.net') ? 'bttTV' : 
+                              srcUrl.includes('frankerfacez.com') ? 'ffz' : 
                               srcUrl.includes('twemoji') ? 'emoji' : 'TwitchChannel',
                     element: null,
                     id: emoteId
@@ -2294,7 +2413,7 @@ function updateBlockedList(blockedList, { blockedEmotes, blockedChannels, newlyA
                 infoText = `(emoteName: ${item.emoteName || 'Unknown'})`;
             } else {
                 titleText = `${item.platform} > ${item.emoteName || 'Unknown'}`;
-                infoText = `<a href="${item.emoteUrl || '#'}" target="_blank" style="color:rgb(34, 184, 59); text-decoration: underline;">(url: ${item.emoteUrl || 'Unknown'})</a>`;
+                infoText = `<a href="${item.emoteUrl || ' #'}" target="_blank" style="color:rgb(34, 184, 59); text-decoration: underline;">(url: ${item.emoteUrl || 'Unknown'})</a>`;
             }
 
             titleText = highlightText(titleText, searchTerm);
